@@ -1,6 +1,6 @@
 # Solana Auditor Skills
 
-> The ultimate Claude Code skill for Solana smart contract security auditing — 120 attack vectors, 6 parallel agents, DeFi protocol checklists, and adversarial reasoning.
+> The ultimate Claude Code skill for Solana smart contract security auditing — 100 attack vectors with concrete code detection patterns, 6 parallel agents, DeFi protocol checklists, and adversarial reasoning.
 
 Built in the style of [pashov/skills](https://github.com/pashov/skills) (Solidity) but rebuilt from scratch for **Rust/SVM/Solana**. Aggregates knowledge from 10+ open-source audit and development skill repositories.
 
@@ -19,20 +19,20 @@ The same proven architecture as pashov/skills — adapted for Solana's account m
 3. **Spawn** — launch 4–6 agents in parallel (vector scan, adversarial reasoning, protocol analysis)
 4. **Report** — merge, deduplicate by root cause, sort by confidence, format
 
-### 120 Attack Vectors (4 reference files)
+### 100 Attack Vectors (4 reference files)
 
 | File | Vectors | Focus Areas |
 | --- | --- | --- |
-| [attack-vectors-1](solana-auditor/references/attack-vectors/attack-vectors-1.md) | 1–30 | Signer checks, ownership, discriminators, account constraints, data matching, reinitialization, writable flags, Token-2022 mint authority, sysvar spoofing, instruction introspection |
-| [attack-vectors-2](solana-auditor/references/attack-vectors/attack-vectors-2.md) | 31–60 | PDA derivation (bumps, sharing, collisions, seeds), CPI safety (arbitrary CPI, signer pass-through, stale data, return values), invoke_signed, Token-2022 transfer hooks, cross-program reentrancy |
-| [attack-vectors-3](solana-auditor/references/attack-vectors/attack-vectors-3.md) | 61–90 | Integer overflow/underflow, precision loss, rounding direction, first-depositor inflation, fee bypass, dust DoS, token decimals, state lifecycle (close, revival, realloc), coupled fields, time units |
-| [attack-vectors-4](solana-auditor/references/attack-vectors/attack-vectors-4.md) | 91–120 | Oracle manipulation (staleness, confidence, spoofing), flash loan attacks, vault share inflation, staking reward gaming, liquidation economics, compute DoS, program upgrade authority, governance, bridges |
+| [attack-vectors-1](solana-auditor/references/attack-vectors/attack-vectors-1.md) | V1–V25 | Signer checks, ownership, discriminators, account constraints, data matching, reinitialization, writable flags, Token-2022 mint authority, sysvar spoofing, instruction introspection, Ed25519 bypass, validation chains (Cashio $48M), Pump Science state bugs |
+| [attack-vectors-2](solana-auditor/references/attack-vectors/attack-vectors-2.md) | V26–V50 | PDA derivation (bumps, sharing, collisions, seeds), CPI safety (arbitrary CPI, signer privilege forwarding, stale data, return values), invoke_signed, Token-2022 (permanent delegate, transfer fee, non-transferable, mint close authority), cross-program reentrancy, security dependency chains |
+| [attack-vectors-3](solana-auditor/references/attack-vectors/attack-vectors-3.md) | V51–V75 | Integer overflow/underflow, precision loss (Neodyme $2.6B), rounding direction, first-depositor inflation, fee bypass, dust poisoning, token decimals, state lifecycle (close, realloc), coupled fields, time units, Token-2022 closable/interest, floating-point, lamport denomination |
+| [attack-vectors-4](solana-auditor/references/attack-vectors/attack-vectors-4.md) | V76–V100 | Oracle manipulation (staleness, confidence, fake accounts, Mango $115M), staking reward gaming, flash stake, reward dilution, cooldown griefing, vault inflation, compute/heap DoS, signature replay, on-chain randomness, rent in bonding curves (Pump Science), transfer hook validation, upgrade authority |
 
 ### 3 Specialized Agent Types
 
 | Agent | Mode | Model | Approach |
 | --- | --- | --- | --- |
-| Vector Scan (x4) | Default + Deep | Sonnet | Systematic triage of ~30 vectors each against full codebase |
+| Vector Scan (x4) | Default + Deep | Sonnet | Systematic triage of 25 vectors each against full codebase |
 | Adversarial Reasoning | Deep only | Opus | Free-form exploit hunting with Feynman questioning, state inconsistency analysis, invariant hunting |
 | Solana Protocol | Deep only | Opus | Domain-specific checklists for lending, AMM, vaults, staking, bridges, governance, proxies, session keys |
 
@@ -79,23 +79,23 @@ cp -r solana-auditor/ ~/.cursor/skills/solana-auditor
 
 | Skill | Description |
 | --- | --- |
-| [solana-auditor](solana-auditor/) | 120-vector security audit with 4–6 parallel agents, DeFi protocol checklists, and adversarial reasoning |
+| [solana-auditor](solana-auditor/) | 100-vector security audit with 4–6 parallel agents, DeFi protocol checklists, and adversarial reasoning |
 
 ---
 
 ## What's Included
 
-### 120 Attack Vectors (4 reference files)
+### 100 Attack Vectors (4 reference files)
 
-Organized by attack surface:
+Every vector includes: **Detect** (grep-able code patterns), **Vulnerable** (concrete Rust code snippet), **Exploit** (how attacker uses it, with real-world references), **Secure** (correct code pattern). Organized by attack surface:
 
-**Account Validation & Authorization (V1–V30):** Missing signer checks, ownership spoofing, type cosplay, discriminator bypass, reinitialization, `init_if_needed` frontrunning, `has_one` constraint gaps, writable flag abuse, `UncheckedAccount` without manual validation, `remaining_accounts` injection, account revival, duplicate mutable accounts, rent exemption, sysvar spoofing, instruction introspection abuse, token mint/authority validation, mint close authority.
+**Account Validation & Authorization (V1–V25):** Missing signer checks, ownership spoofing, type cosplay, discriminator bypass, reinitialization, `init_if_needed` frontrunning, `has_one` constraint gaps, writable flag abuse, `UncheckedAccount` without manual validation, `remaining_accounts` injection, account revival, sysvar spoofing (Wormhole $320M), instruction introspection, predictable PDA initialization, validation chain bypass (Cashio $48M), Ed25519 signature verification bypass, missing state update (Pump Science H-02).
 
-**PDA, CPI & Cross-Program Security (V31–V60):** Non-canonical bumps, PDA sharing, seed concatenation collisions, cross-type seed collisions, purpose isolation, arbitrary CPI, `invoke` vs `invoke_signed` confusion, signer pass-through, SOL balance drain via CPI, post-CPI ownership change, stale data after CPI (missing `reload()`), CPI return values ignored, Token-2022 incompatibility, transfer hook gaps, cross-program reentrancy, address lookup tables, durable nonces.
+**PDA, CPI & Cross-Program Security (V26–V50):** Non-canonical bumps, PDA sharing, seed concatenation collisions, arbitrary CPI, signer privilege forwarding, stale data after CPI (missing `reload()`), CPI return values ignored, Token-2022 permanent delegate (silent vault drain), transfer fee accounting mismatch, non-transferable tokens, mint close authority reinitialization bypass, CPI ordering violations, security dependency chains, dangling references after CPI close.
 
-**Arithmetic, Tokens & State Management (V61–V90):** Integer overflow/underflow, division-before-multiplication, unsafe casting, rounding direction exploitation, first-depositor vault inflation, round-trip profit, saturating math misuse, slippage not enforced, lamport invariant violation, fee bypass on alternate paths, pre/post-fee confusion, token decimals mismatch, coupled field inconsistency, counter drift, time unit mismatch, account realloc without zero-init, unbounded collection DoS, Token-2022 interest/fee extensions, unsafe Rust.
+**Arithmetic, Tokens & State Management (V51–V75):** Integer overflow/underflow, division-before-multiplication (Neodyme $2.6B), unsafe `as` casting, rounding direction exploitation, first-depositor vault inflation, saturating math misuse, slippage not enforced, fee bypass on alternate paths, pre/post-fee confusion (Pump Science M-01), token decimals mismatch, coupled field inconsistency, time unit mismatch, Token-2022 transfer fee blocks account close, floating-point in financial logic, lamport/SOL denomination confusion.
 
-**Oracle, DeFi & Platform-Level (V91–V120):** Stale oracle price, confidence interval not validated, fake oracle account, retroactive pricing, on-chain price as slippage reference, flash loan manipulation, vault share inflation, staking reward index bugs, flash stake/unstake capture, reward dilution via direct transfer, precision loss zeroing small stakers, cooldown griefing, liquidation incentive gaps, self-liquidation profit, interest during pause, compute budget DoS, unbounded logs, supply inflation/deflation, program upgrade authority.
+**Oracle, DeFi & Platform-Level (V76–V100):** Stale oracle price, confidence interval, fake oracle account, on-chain spot price manipulation (Mango Markets $115M), staking reward index bugs, flash stake/unstake, reward dilution via direct transfer, cooldown griefing, self-liquidation profit, vault share inflation, compute budget DoS, heap exhaustion (32KB), signature replay without nonce, on-chain randomness manipulation, rent in bonding curves (Pump Science M-02), transfer hook validation, `.unwrap()` panics, upgrade authority, interest during pause.
 
 ### Protocol Checklists (74 items across 8 domains)
 

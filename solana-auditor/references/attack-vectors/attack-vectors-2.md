@@ -1,160 +1,518 @@
 # Attack Vectors Reference — PDA, CPI & Cross-Program Security (2/4)
 
-> Part 2 of 4 · Vectors 31–60 of 120 total
-> Covers: PDA derivation, seed security, CPI safety, invoke_signed, signer escalation, program validation, stale data
-
-Each vector follows the format:
-- **D:** Description — what makes it exploitable
-- **FP:** False-positive conditions — mitigations that would make it NOT a finding
+> Part 2 of 4 · Vectors 26–50 of 100 total
+> Covers: PDA derivation, seed security, CPI safety, invoke_signed, signer escalation, Token-2022 CPI, program validation
+> Sources: sealevel-attacks, Jet Protocol, Crema Finance, Ackee audits, Neodyme, Tensor, Solodit
 
 ---
 
-**31. Non-Canonical Bump Seed**
+## V26 — Non-Canonical Bump Seed
 
-- **D:** PDA created or verified using `create_program_address` with a user-supplied bump instead of the canonical bump from `find_program_address`. Multiple valid bumps exist for the same seeds — attacker can derive alternate PDAs, fragmenting state or bypassing intended PDA checks.
-- **FP:** Anchor `seeds` + `bump` constraint used (automatic canonical bump). Native: `find_program_address` used for derivation. Canonical bump stored in account data and reused.
+**Detect:** `create_program_address` with user-supplied bump parameter instead of `find_program_address`. Bump accepted from instruction data or function args. Missing stored canonical bump reuse.
 
-**32. PDA Sharing — Missing User-Specific Seed**
+**Vulnerable:**
+```rust
+pub fn withdraw(ctx: Context<Withdraw>, bump: u8) -> Result<()> {
+    let seeds = &[b"vault", user.key().as_ref(), &[bump]];  // user controls bump!
+    let pda = Pubkey::create_program_address(seeds, ctx.program_id)?;
+}
+```
 
-- **D:** PDA seeds lack a user-specific component (e.g., `user.key()`). All users share the same PDA, meaning one user's action can affect another user's state. Classic example: a global vault PDA instead of per-user vaults.
-- **FP:** Seeds include `user.key().as_ref()` or equivalent unique identifier. Design explicitly requires a shared/global account (e.g., protocol config). Access control prevents unauthorized state changes on shared accounts.
+**Exploit:** Multiple valid bumps exist for same seeds. Attacker creates alternate PDAs, fragmenting state or bypassing PDA-based checks.
 
-**33. Seed Concatenation Collision**
+**Secure:**
+```rust
+// Anchor: seeds + bump auto-derives canonical bump
+#[account(seeds = [b"vault", user.key().as_ref()], bump)]
+// Native: let (pda, canonical_bump) = Pubkey::find_program_address(seeds, program_id);
+// Store bump: vault.bump = canonical_bump;
+```
 
-- **D:** PDA seeds constructed from variable-length user inputs without delimiters or fixed-length encoding. Seeds `["AB", "C"]` and `["A", "BC"]` produce the same PDA — attacker finds a collision to access another user's account.
-- **FP:** All seeds are fixed-length (pubkeys, u8 arrays). Variable-length seeds use canonical delimiters or length prefixes. Seeds are hashed before use.
+---
 
-**34. Seed Collision Across Account Types**
+## V27 — PDA Sharing — Missing User-Specific Seed
 
-- **D:** Different account types (vault, escrow, config) use seeds with no unique type prefix. An attacker's "vault" PDA collides with a legitimate "escrow" PDA, enabling cross-type access.
-- **FP:** Unique string prefixes per type: `b"vault"`, `b"escrow"`, `b"config"`. Seeds include account type discriminator.
+**Detect:** PDA `seeds` with only static strings (e.g., `seeds = [b"pool"]`) without user-specific or context-specific components. Same PDA reused across different authority domains.
 
-**35. PDA Purpose Isolation Violation**
+**Vulnerable:**
+```rust
+#[account(seeds = [b"staking_pool_pda"], bump)]
+pub pool: Account<'info, Pool>,
+// All users share same PDA — one user's action affects everyone
+```
 
-- **D:** Single PDA used across multiple logical domains or external programs. If one domain is compromised, the shared PDA grants access to all domains.
-- **FP:** Each distinct capability (vault, escrow, staking) uses a distinct PDA with distinct seeds. Program-specific seeds prevent cross-program PDA reuse.
+**Exploit:** **Jet Protocol** — deposit notes PDA not derived from depositor pubkey. Any signed caller could burn another user's tokens.
 
-**36. Exposed PDA Seeds — User-Controllable Derivation**
+**Secure:**
+```rust
+#[account(seeds = [b"user_pool", user.key().as_ref()], bump)]
+```
 
-- **D:** PDA seeds entirely composed of user-controlled inputs without any program-controlled components. Attacker can pre-compute and pre-initialize PDAs to front-run legitimate users.
-- **FP:** Seeds include program-controlled values (authority pubkey, protocol nonce). `init` constraint prevents re-initialization. Seeds include the payer's key.
+---
 
-**37. Forced Seed De-Bump**
+## V28 — Seed Concatenation Collision
 
-- **D:** Program accepts a bump seed from the user and doesn't verify it's canonical. Attacker provides bump = 0 or a non-canonical bump, causing `create_program_address` to fail or derive a different address than expected.
-- **FP:** Bump stored on-chain and reused. Anchor `bump` constraint validates canonical bump automatically. `find_program_address` used to derive and verify.
+**Detect:** Variable-length user inputs (strings, byte slices) concatenated in PDA seeds without fixed-length encoding or delimiters.
 
-**38. Arbitrary CPI — Unvalidated Program ID**
+**Vulnerable:**
+```rust
+seeds = [b"pool", token_name.as_bytes()]
+// "poolABC" and "poolAB" + "C" could collide if seeds are concatenated
+```
 
-- **D:** `invoke()` or `invoke_signed()` called with a program ID from an unvalidated `AccountInfo`. Attacker passes a malicious program that mimics the expected interface — returns success without performing the operation, or performs a different operation (e.g., reverse transfer).
-- **FP:** Anchor `Program<'info, Token>` type used (automatic validation). Native: `require_keys_eq!(program.key(), expected_program::ID)`. Program ID hardcoded in CPI call.
+**Exploit:** `["AB", "C"]` and `["A", "BC"]` produce identical seed bytes → same PDA → cross-user state access.
 
-**39. CPI Without Signer Seeds — invoke vs invoke_signed Confusion**
+**Secure:**
+```rust
+// Use fixed-length inputs (pubkeys are always 32 bytes)
+seeds = [b"pool", mint_a.key().as_ref(), mint_b.key().as_ref()]
+// Or hash variable-length inputs
+```
 
-- **D:** `invoke()` used where `invoke_signed()` is required because a PDA needs to sign the CPI. The CPI fails silently or panics. Conversely, `invoke_signed()` used unnecessarily, potentially escalating signer privileges.
-- **FP:** PDA signer correctly identified — `invoke_signed` used with proper seeds. Non-PDA CPI correctly uses `invoke`. Anchor CPI context correctly constructed.
+---
 
-**40. Signer Pass-Through in CPI**
+## V29 — Seed Collision Across Account Types
 
-- **D:** All accounts from the current instruction passed into a CPI call without filtering. Signer accounts retain their signer privilege in the CPI — a malicious callee can use the signer authority to perform unauthorized actions.
-- **FP:** Only necessary accounts passed to CPI. Signer accounts explicitly filtered out unless required. Account isolation via user-specific PDAs limits blast radius.
+**Detect:** Different PDA types (`vault`, `escrow`, `config`) using seeds without unique type prefixes. Same seed structure for different structs.
 
-**41. SOL Balance Drain via CPI**
+**Vulnerable:**
+```rust
+// Vault: seeds = [user.key().as_ref()]
+// Escrow: seeds = [user.key().as_ref()]
+// Same seeds → same PDA → type confusion
+```
 
-- **D:** Signer account passed to an external CPI. The callee program can spend SOL from the signer (Solana has no `msg.value` equivalent — any signer can be drained). No balance check before/after CPI.
-- **FP:** `signer.lamports()` recorded before CPI, verified after: `balance_before <= balance_after + max_spendable`. CPI target is a trusted, verified program. PDA used instead of user signer for CPI authority.
+**Secure:**
+```rust
+seeds = [b"vault", user.key().as_ref()]   // unique prefix per type
+seeds = [b"escrow", user.key().as_ref()]
+```
 
-**42. Post-CPI Ownership Change**
+---
 
-- **D:** An attacker-controlled program uses the `assign` instruction during CPI to change an account's owner. After the CPI returns, the account is no longer owned by the expected program, but the caller doesn't re-verify.
-- **FP:** Account owner re-checked after CPI: `account.owner == expected_program`. CPI target is a trusted program (SPL Token, System Program). Account is a PDA owned by the calling program.
+## V30 — Arbitrary CPI — Unvalidated Program ID
 
-**43. Stale Data After CPI — Missing reload()**
+**Detect:** `invoke()` or `invoke_signed()` where the target program is `AccountInfo<'info>` without `require_keys_eq!` against a known program ID. In Anchor: program account not typed as `Program<'info, T>`.
 
-- **D:** Account data deserialized before a CPI, then used after the CPI without calling `reload()`. The CPI may have modified the on-chain state, but the in-memory struct still holds the pre-CPI values. Decisions based on stale balances enable double-spends or over-withdrawals.
-- **FP:** `ctx.accounts.account.reload()?` called after every CPI that modifies shared accounts. Account only read after all CPIs complete. No CPI modifies the account in question.
+**Vulnerable:**
+```rust
+pub token_program: AccountInfo<'info>,  // anyone can pass any program
+// ...
+invoke(&transfer_ix, &[from, to, token_program.clone()])?;
+```
 
-**44. CPI Return Value Ignored**
+**Exploit:** Attacker passes malicious program that returns success without transferring. **Sealevel attack #5**. Protocol believes transfer happened, updates state.
 
-- **D:** CPI invocation result not propagated with `?`. If the inner call fails, the outer instruction continues executing with an inconsistent state (e.g., transfer failed but balance decremented).
-- **FP:** All CPI calls wrapped with `?` operator. Anchor CPI helpers (`token::transfer(ctx, amount)?`) used. Native: `invoke(...)?.` or explicit match on result.
+**Secure:**
+```rust
+pub token_program: Program<'info, Token>,  // auto-validates program ID
+// Native: require!(*token_program.key == spl_token::ID);
+```
 
-**45. Unnecessary Accounts Passed to CPI**
+---
 
-- **D:** More accounts than needed passed to a CPI call. The callee gains read/write access to accounts it shouldn't touch, expanding the attack surface.
-- **FP:** CPI account lists contain only the minimum required accounts. Anchor CPI context structs enforce exact account requirements.
+## V31 — CPI Without Signer Seeds
 
-**46. invoke_signed with Incorrect Seeds**
+**Detect:** `invoke()` used where PDA needs to sign (should be `invoke_signed()`). Or `invoke_signed()` with empty signer seeds `&[]`.
 
-- **D:** `invoke_signed` called with wrong seeds or wrong bump, causing PDA signature to fail. In some cases, the wrong seeds derive a valid but unintended PDA, causing the wrong account to sign.
-- **FP:** Seeds match the PDA derivation exactly. Stored canonical bump used. Anchor `CpiContext::new_with_signer` with correct signer seeds.
+**Vulnerable:**
+```rust
+invoke(&transfer_ix, &[vault_pda, destination, token_program])?;  // vault_pda can't sign!
+// Should be invoke_signed with vault PDA seeds
+```
 
-**47. CPI to System Program — Unintended Account Creation**
+**Secure:**
+```rust
+let seeds = &[b"vault", &[vault.bump]];
+invoke_signed(&transfer_ix, &[vault_pda, destination, token_program], &[seeds])?;
+```
 
-- **D:** CPI to System Program's `create_account` or `transfer` without verifying the destination account. Attacker forces creation of accounts at unexpected addresses or redirects SOL transfers.
-- **FP:** Destination account validated as expected PDA or known address. Account creation uses PDA seeds (deterministic). Transfer destination is a protocol-controlled account.
+---
 
-**48. Missing Program ID Check on Token Program**
+## V32 — CPI Signer Privilege Forwarding
 
-- **D:** Token operations (transfer, mint, burn) performed via CPI without distinguishing between SPL Token (legacy) and Token-2022. Using the wrong program ID causes silent failures or fund loss when Token-2022 mints are involved.
-- **FP:** Anchor `Interface<'info, TokenInterface>` or `InterfaceAccount` used. Native: dynamic program ID detection based on mint owner. `transfer_checked` used with correct program.
+**Detect:** User wallet (`Signer<'info>`) passed as a signer to CPI targeting an untrusted or upgradeable program. User's signing authority forwarded to third-party code.
 
-**49. Token-2022 Incompatibility — Legacy transfer Used**
+**Vulnerable:**
+```rust
+let cpi_ctx = CpiContext::new(
+    ctx.accounts.external_program.to_account_info(),  // untrusted program
+    ExternalInstruction {
+        user_wallet: ctx.accounts.user.to_account_info(),  // user's signer forwarded!
+    },
+);
+```
 
-- **D:** `anchor_spl::token::transfer` (or native equivalent) hardcodes the legacy Token Program ID. When used with Token-2022 mints, the CPI fails or misbehaves, causing DoS or fund loss.
-- **FP:** `transfer_checked` used for all token operations. `InterfaceAccount` types detect correct program. Mint and decimals provided in transfer (required by `transfer_checked`).
+**Exploit:** External program invokes System Program transfer from user's wallet, draining SOL. The user signed the outer transaction, so the signer privilege carries through CPI.
 
-**50. Token-2022 Transfer Hook Not Accounted For**
+**Secure:**
+```rust
+// Use protocol PDA as CPI authority, never forward user signers to untrusted programs
+let cpi_ctx = CpiContext::new_with_signer(
+    ctx.accounts.external_program.to_account_info(),
+    ExternalInstruction { authority: ctx.accounts.protocol_pda.to_account_info() },
+    signer_seeds,
+);
+// Verify balances after CPI: require!(user.lamports() >= pre_balance - max_spend);
+```
 
-- **D:** Token-2022 mint has a transfer hook extension, but the program doesn't pass the required extra accounts for the hook CPI. Transfer silently fails or reverts.
-- **FP:** Transfer hook accounts resolved and passed via `remaining_accounts`. Program checks for transfer hook extension on the mint. Only legacy tokens supported (documented and enforced).
+---
 
-**51. CPI Privilege Escalation via invoke_signed**
+## V33 — Post-CPI Account Not Reloaded
 
-- **D:** `invoke_signed` extends signer privileges to accounts that shouldn't be signers. Attacker exploits the elevated privilege to authorize operations on accounts they don't control.
-- **FP:** Only PDA accounts given signer privilege via `invoke_signed`. Non-PDA accounts explicitly not included in signer seeds. Minimum necessary privileges granted.
+**Detect:** Account field access after any `cpi::` call or `invoke`/`invoke_signed` without intervening `.reload()?`. Stale in-memory data used for decisions.
 
-**52. Missing CPI Program ID Validation in Anchor**
+**Vulnerable:**
+```rust
+token::mint_to(cpi_ctx, amount)?;
+msg!("Supply: {}", ctx.accounts.mint.supply);  // STALE — shows pre-mint value
+// Decision based on stale balance can enable double-spend
+```
 
-- **D:** Anchor instruction uses `/// CHECK:` on a program account instead of `Program<'info, T>`. The program ID is never validated, enabling arbitrary CPI.
-- **FP:** `Program<'info, Token>` or equivalent typed program account used. Manual `require_keys_eq!` check on program key. `address` constraint on the program account.
+**Exploit:** **Watt Protocol audit** — stale reward accumulator after CPI led to incorrect reward calculations.
 
-**53. Cross-Program Reentrancy via CPI Callback**
+**Secure:**
+```rust
+token::mint_to(cpi_ctx, amount)?;
+ctx.accounts.mint.reload()?;  // refresh from on-chain data
+msg!("Supply: {}", ctx.accounts.mint.supply);  // correct
+```
 
-- **D:** Program makes a CPI to an external program that calls back into the original program before the first call completes. State is partially updated — the callback sees inconsistent state and can exploit it.
-- **FP:** State fully updated before any CPI (checks-effects-interactions pattern). Reentrancy guard flag set before CPI, checked on entry. No external CPI to untrusted programs.
+---
 
-**54. PDA Bump Not Stored — Recomputation Cost**
+## V34 — CPI Return Value Ignored
 
-- **D:** Canonical bump not stored in account data, forcing `find_program_address` on every instruction. This wastes ~2000 CU per call. While not a security vulnerability itself, it can push complex transactions over the compute budget, causing DoS.
-- **FP:** Bump stored as `pub bump: u8` in account struct. `create_program_address` used with stored bump for re-derivation. Compute budget adequate for the operation.
+**Detect:** `invoke()` or CPI helper without `?` operator. `Result` from CPI not propagated.
 
-**55. PDA Used as Signer Without Ownership Verification**
+**Vulnerable:**
+```rust
+spl_token::instruction::transfer(token_program.key, source.key, dest.key, authority.key, &[], amount);
+// Return value ignored! Transfer may have failed.
+```
 
-- **D:** PDA derived from user-controlled seeds used as a signer, but the program doesn't verify it owns the PDA. Attacker derives a PDA that belongs to their malicious program and uses it to sign unauthorized CPIs.
-- **FP:** PDA verified as owned by the current program before use as signer. Seeds include program-specific constants. Anchor `seeds` constraint verifies PDA derivation.
+**Exploit:** Transfer fails silently, state updated as if it succeeded. Balance accounting desyncs.
 
-**56. CPI to Upgradeable Program Without Freeze Check**
+**Secure:**
+```rust
+invoke(&spl_token::instruction::transfer(...)?, &[source, dest, authority])?;
+// Or Anchor: token::transfer(ctx, amount)?;
+```
 
-- **D:** CPI target is an upgradeable program that could be maliciously upgraded between the time the call is validated and executed. An upgrade changes the program's behavior, potentially converting a safe CPI into a malicious one.
-- **FP:** CPI target is a non-upgradeable (frozen) program. Program upgrade authority validated as trusted. Immutable programs (SPL Token, System Program) used.
+---
 
-**57. Address Lookup Table Contains Signer**
+## V35 — invoke_signed with Incorrect Seeds
 
-- **D:** Signer pubkey included in an Address Lookup Table (ALT). Signer pubkeys must always be inline in the transaction — inclusion in ALT breaks transaction signing validation.
-- **FP:** Only non-signer accounts in ALT. Signer accounts always included directly in transaction. ALT not used.
+**Detect:** `invoke_signed` seeds that don't match the PDA derivation. Stored bump not used. Seeds in wrong order.
 
-**58. Durable Nonce Not First Instruction**
+**Vulnerable:**
+```rust
+let seeds = &[b"vault", &[bump]];  // missing user.key() that was in init seeds!
+invoke_signed(&ix, &accounts, &[seeds])?;  // PDA mismatch — CPI fails or signs wrong account
+```
 
-- **D:** `AdvanceNonceAccount` instruction placed after other instructions in a transaction using durable nonces. The nonce doesn't advance, potentially allowing transaction replay.
-- **FP:** `AdvanceNonceAccount` is the first instruction. Durable nonces not used. Transaction uses recent blockhash instead.
+**Secure:**
+```rust
+let seeds = &[b"vault", user.key().as_ref(), &[vault.bump]];  // matches init derivation exactly
+invoke_signed(&ix, &accounts, &[seeds])?;
+```
 
-**59. Cross-Program State Desync**
+---
 
-- **D:** Program reads state from an external program's account, caches it, then makes decisions based on the cached value. Between the read and the decision, another instruction modifies the external state. The program acts on stale cross-program data.
-- **FP:** State read and decision in the same instruction with no intervening CPI. External state re-read after any CPI. Atomic transaction design ensures consistency.
+## V36 — Missing Token Program ID Discrimination
 
-**60. Unvalidated remaining_accounts Used in CPI**
+**Detect:** Token operations using hardcoded `spl_token::ID` when Token-2022 mints may be involved. `anchor_spl::token::transfer` instead of `anchor_spl::token_interface::transfer_checked`.
 
-- **D:** `remaining_accounts` passed directly into a CPI call without validation. Attacker injects malicious accounts into the remaining accounts list, which the CPI callee processes as legitimate.
-- **FP:** Each remaining account validated (owner, key, type) before CPI. remaining_accounts not passed to CPI. CPI uses only named, validated accounts.
+**Vulnerable:**
+```rust
+anchor_spl::token::transfer(cpi_ctx, amount)?;  // hardcodes legacy Token program
+// Fails on Token-2022 mints — DoS or fund loss
+```
+
+**Exploit:** **Tensor NFT Marketplace** — royalty payouts failed for Token-2022 mints because legacy `transfer` was hardcoded.
+
+**Secure:**
+```rust
+anchor_spl::token_interface::transfer_checked(cpi_ctx, amount, decimals)?;
+// Uses InterfaceAccount<'info, TokenAccount> + Interface<'info, TokenInterface>
+```
+
+---
+
+## V37 — Token-2022 Transfer Hook Not Accounted For
+
+**Detect:** `transfer_checked` CPI to Token-2022 mints without resolving and passing extra accounts required by the transfer hook extension.
+
+**Vulnerable:**
+```rust
+transfer_checked(cpi_ctx, amount, decimals)?;
+// Mint has transfer hook — extra accounts not passed via remaining_accounts
+// Transfer reverts
+```
+
+**Exploit:** Protocol cannot transfer tokens with transfer hooks. DoS on deposits/withdrawals for affected mints.
+
+**Secure:**
+```rust
+// Resolve hook accounts and pass via remaining_accounts
+let hook_accounts = resolve_transfer_hook_accounts(&mint)?;
+// Include in CPI
+```
+
+---
+
+## V38 — Missing CPI Program ID Validation in Anchor
+
+**Detect:** `/// CHECK:` on a program account instead of `Program<'info, T>`. CPI target program ID never validated.
+
+**Vulnerable:**
+```rust
+/// CHECK: This is the token program
+pub token_program: AccountInfo<'info>,
+// No address validation — arbitrary CPI
+```
+
+**Secure:**
+```rust
+pub token_program: Program<'info, Token>,
+// Or: #[account(address = spl_token::ID)]
+```
+
+---
+
+## V39 — Cross-Program Reentrancy via CPI Callback
+
+**Detect:** Program A makes CPI to untrusted program B, which calls back into program A. State partially updated before CPI — callback sees inconsistent state. Note: Solana's runtime prevents A→A reentrancy, but A→B→A is possible if different accounts are used.
+
+**Vulnerable:**
+```rust
+// Program A: update partial state, then CPI to untrusted B
+vault.pending_withdrawal = amount;  // partial state update
+invoke(&ix_to_untrusted_b, &[...])?;
+vault.balance -= amount;  // not yet executed when B calls back into A
+```
+
+**Exploit:** B calls back into A with different accounts, using the partially-updated state.
+
+**Secure:**
+```rust
+// Update ALL state before CPI (checks-effects-interactions)
+vault.balance -= amount;
+vault.pending_withdrawal = 0;
+invoke(&ix_to_untrusted_b, &[...])?;
+```
+
+---
+
+## V40 — CPI to Upgradeable Program
+
+**Detect:** `invoke` / `invoke_signed` targeting a program that is not immutable (upgrade authority != None). Target program can be maliciously upgraded between transactions.
+
+**Vulnerable:**
+```rust
+invoke(&ix, &[target_program.clone(), ...])?;
+// target_program could be upgraded to steal funds in next slot
+```
+
+**Secure:**
+```rust
+// Verify program is immutable: upgrade authority set to None
+// Or: only CPI to known immutable programs (SPL Token, System Program)
+// Or: validate upgrade authority is trusted (multisig, governance)
+```
+
+---
+
+## V41 — Address Lookup Table Contains Signer
+
+**Detect:** Signer pubkey included in ALT. Signer accounts must always be inline in the transaction message — ALT inclusion breaks signing validation.
+
+**Vulnerable:**
+```rust
+// Client-side: putting signer in ALT
+alt.entries.push(user_wallet.pubkey());  // breaks signing
+```
+
+**Secure:** Only non-signer accounts in ALT. Signer accounts always inline in transaction.
+
+---
+
+## V42 — Durable Nonce Not First Instruction
+
+**Detect:** `AdvanceNonceAccount` instruction placed after index 0 in transaction using durable nonces.
+
+**Vulnerable:**
+```rust
+// ix[0] = do_something, ix[1] = advance_nonce
+// Nonce not advanced — transaction can be replayed
+```
+
+**Secure:** `AdvanceNonceAccount` must be instruction index 0.
+
+---
+
+## V43 — Token-2022 Permanent Delegate
+
+**Detect:** Protocol accepting arbitrary mints without checking for `ExtensionType::PermanentDelegate`. Vaults/pools/escrows holding tokens with permanent delegates.
+
+**Vulnerable:**
+```rust
+pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+    transfer_checked(cpi_ctx, amount, decimals)?;
+    // No check if mint has PermanentDelegate extension
+    // Delegate can transfer/burn tokens from vault at any time
+}
+```
+
+**Exploit:** Permanent delegate transfers all deposited tokens out of vault without any signature from the vault authority.
+
+**Secure:**
+```rust
+let mint_data = ctx.accounts.mint.to_account_info().try_borrow_data()?;
+let mint_state = PodStateWithExtensions::<PodMint>::unpack(&mint_data)?;
+require!(mint_state.get_extension::<PermanentDelegate>().is_err(), NoPermanentDelegates);
+```
+
+---
+
+## V44 — Token-2022 Transfer Fee Accounting Mismatch
+
+**Detect:** `transfer_checked` CPI followed by bookkeeping that uses the requested amount instead of actual received amount. Missing balance-before/balance-after pattern.
+
+**Vulnerable:**
+```rust
+transfer_checked(user_token, vault_token, authority, amount, decimals)?;
+vault.deposits[user] += amount;  // BUG: vault received (amount - transfer_fee)
+```
+
+**Exploit:** Accounting credits more than received. Over time, vault becomes insolvent — last withdrawers get nothing.
+
+**Secure:**
+```rust
+let pre = vault_token.amount;
+transfer_checked(user_token, vault_token, authority, amount, decimals)?;
+ctx.accounts.vault_token.reload()?;
+vault.deposits[user] += ctx.accounts.vault_token.amount - pre;  // actual received
+```
+
+---
+
+## V45 — Token-2022 Non-Transferable Extension
+
+**Detect:** Protocol assumes tokens are freely transferable without checking `ExtensionType::NonTransferable`. Soulbound tokens cannot be transferred between accounts.
+
+**Vulnerable:**
+```rust
+// Vault accepts any mint — including soulbound tokens
+// When user tries to withdraw, transfer fails permanently
+```
+
+**Secure:**
+```rust
+require!(mint_state.get_extension::<NonTransferable>().is_err(), NonTransferableNotSupported);
+```
+
+---
+
+## V46 — Mint Close Authority — Reinitialization Bypass
+
+**Detect:** Protocol accepting mints with `MintCloseAuthority` extension without re-validating mint properties on each interaction. Mint can be closed and re-created at same address with different extensions.
+
+**Vulnerable:**
+```rust
+// Store mint pubkey on initialization
+pool.mint = mint.key();
+// Later: trust the mint without re-checking extensions
+// Mint was closed and re-created without TransferFee extension → bypass fees
+```
+
+**Exploit:** Attacker creates mint → registers in protocol → closes mint → re-creates at same address with different extensions (no KYC, no fees, no soulbound). Old token accounts survive.
+
+**Secure:**
+```rust
+// Re-validate mint extensions on every interaction, or reject mints with MintCloseAuthority
+require!(mint_state.get_extension::<MintCloseAuthority>().is_err(), MintCloseAuthorityNotSupported);
+```
+
+---
+
+## V47 — CPI Ordering — Lamports Before Completion
+
+**Detect:** Manual lamport transfer (via `**lamports.borrow_mut()`) before CPI `close_account` completes. Violates Solana's instruction-level lamport balance invariant.
+
+**Vulnerable:**
+```rust
+// Transfer lamports to bidder manually
+**ctx.accounts.escrow.lamports.borrow_mut() -= refund_amount;
+**ctx.accounts.bidder.lamports.borrow_mut() += refund_amount;
+// Then CPI close_account on escrow — fails with UnbalancedInstruction
+```
+
+**Exploit:** **OneMind Auction audit** — auction cancellation permanently failed when bids existed. Funds locked.
+
+**Secure:**
+```rust
+// Let CPI handle lamport transfers, or do manual transfers AFTER all CPIs complete
+close_account(cpi_ctx)?;  // handles lamport transfer atomically
+```
+
+---
+
+## V48 — Security Dependency Chain
+
+**Detect:** `Account<'info, T>` without seeds/bump or address constraint used as root of trust for downstream `has_one`/`constraint` checks. Unconstrained root poisons all derived validations.
+
+**Vulnerable:**
+```rust
+pub config: Account<'info, Config>,          // NO seeds, NO address constraint
+#[account(constraint = vault.config == config.key())]
+pub vault: Account<'info, Vault>,            // validates against fake config
+#[account(constraint = position.vault == vault.key())]
+pub position: Account<'info, Position>,      // cascading fake validation
+```
+
+**Exploit:** Entire validation chain is meaningless. Attacker provides crafted config → derives matching vault → accesses any position.
+
+**Secure:**
+```rust
+#[account(seeds = [b"config"], bump)]  // PDA — unforgeable root
+pub config: Account<'info, Config>,
+```
+
+---
+
+## V49 — Dangling References After Account Close via CPI
+
+**Detect:** Account data cached (deserialized) before CPI that closes the account. Cached data used after CPI — references stale/zeroed memory.
+
+**Vulnerable:**
+```rust
+let balance = ctx.accounts.source.amount;  // cache
+close_account_cpi(ctx)?;                    // source closed
+msg!("Had balance: {}", balance);           // stale — source may be zeroed
+// Worse: ctx.accounts.source.amount — dangling reference
+```
+
+**Secure:**
+```rust
+let balance = ctx.accounts.source.amount;
+require!(balance > 0, EmptyAccount);
+// Close LAST, after all reads
+close_account_cpi(ctx)?;
+// Do NOT read from source after close
+```
+
+---
+
+## V50 — Account Reassignment Data Wipe
+
+**Detect:** `account.assign(&system_program::ID)` followed by `account.assign(program_id)` — temporary ownership change zeroes account data.
+
+**Vulnerable:**
+```rust
+account.assign(&system_program::ID);  // runtime zeroes data on ownership change
+account.assign(ctx.program_id);        // reassign back — but data is gone
+```
+
+**Exploit:** All account state permanently destroyed. Program functions referencing this account break.
+
+**Secure:** Never temporarily reassign account ownership. If ownership must change, backup and restore data explicitly.

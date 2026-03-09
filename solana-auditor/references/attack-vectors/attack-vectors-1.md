@@ -1,160 +1,544 @@
 # Attack Vectors Reference — Account Validation & Authorization (1/4)
 
-> Part 1 of 4 · Vectors 1–30 of 120 total
-> Covers: signer checks, ownership, discriminators, account constraints, data matching, writable flags, reinitialization
-
-Each vector follows the format:
-- **D:** Description — what makes it exploitable
-- **FP:** False-positive conditions — mitigations that would make it NOT a finding
+> Part 1 of 4 · Vectors 1–25 of 100 total
+> Covers: signer checks, ownership, discriminators, account constraints, reinitialization, account validation chains
+> Sources: Wormhole ($320M), Cashio ($48M), sealevel-attacks, Helius, OtterSec, Ackee, Solodit audits
 
 ---
 
-**1. Missing Signer Check**
+## V1 — Missing Signer Check
 
-- **D:** Authority account used in a privileged instruction (withdraw, transfer, admin update) without verifying `is_signer`. Any account address can be passed without a signature, allowing unauthorized execution.
-- **FP:** Anchor `Signer<'info>` type used. Native: explicit `if !account.is_signer` check present. Pinocchio: `is_signer()` validated.
+**Detect:** `AccountInfo<'info>` or `UncheckedAccount<'info>` for authority/admin accounts instead of `Signer<'info>`. In native: `next_account_info` on authority without `if !account.is_signer` check.
 
-**2. Missing Owner Check on Deserialized Account**
+**Vulnerable:**
+```rust
+pub struct Withdraw<'info> {
+    #[account(mut)]
+    pub vault: Account<'info, Vault>,
+    pub authority: AccountInfo<'info>,  // NOT Signer — anyone can pass any pubkey
+}
+```
 
-- **D:** Account data deserialized via `try_from_slice` or manual parsing without first checking `account.owner == expected_program_id`. Attacker crafts a fake account with identical data layout owned by a malicious program, spoofing balances or authorities.
-- **FP:** Anchor `Account<'info, T>` used (automatic owner check). Native: explicit owner comparison before deserialization. Pinocchio: `is_owned_by()` check present.
+**Exploit:** Attacker passes the vault owner's pubkey as `authority` without signing. Drains vault.
 
-**3. Type Cosplay — Missing Discriminator Check**
+**Secure:**
+```rust
+pub authority: Signer<'info>,  // Anchor enforces is_signer
+// Native:
+if !authority.is_signer { return Err(ProgramError::MissingRequiredSignature); }
+```
 
-- **D:** Account struct deserialized without verifying its 8-byte discriminator. Attacker passes an `Admin` account where a `User` account is expected (or vice versa), bypassing privilege checks because the data layouts partially overlap.
-- **FP:** Anchor `Account<'info, T>` or `#[account]` macro used (automatic discriminator). Native: manual discriminator byte check at offset 0. Zero-copy: `AccountLoader<'info, T>` with discriminator validation.
+---
 
-**4. Reinitialization Attack**
+## V2 — Missing Owner Check on Deserialized Account
 
-- **D:** Initialization instruction can be called on an already-initialized account, overwriting the authority field. Attacker reinitializes to become the new owner and drains controlled assets.
-- **FP:** Anchor `init` constraint used (prevents reinit by checking discriminator + owner). Native: explicit `is_initialized` flag checked before setup logic. `init_if_needed` used with additional validation of existing state.
+**Detect:** `try_from_slice()` / `unpack()` / `BorshDeserialize` on account data without prior `account.owner == expected_program_id` check. In Anchor: `AccountInfo<'info>` with `/// CHECK:` used instead of `Account<'info, T>`.
 
-**5. init_if_needed Without State Validation**
+**Vulnerable:**
+```rust
+let vault: Vault = Vault::try_from_slice(&vault_account.data.borrow())?;
+// No check: vault_account.owner == program_id
+// Attacker creates fake account with identical layout, owned by their program
+```
 
-- **D:** `init_if_needed` constraint used without checking existing account state when the account already exists. Attacker pre-initializes the account with harmful state (e.g., wrong authority) before the legitimate user calls the instruction.
-- **FP:** Code validates existing data fields (owner, authority) when account already exists. `init` used instead of `init_if_needed`. Frontrunning protection via PDA seeds that include the payer's key.
+**Exploit:** Attacker crafts account with spoofed balance/authority fields. Program trusts the data.
 
-**6. Missing has_one Constraint — Data Mismatch**
+**Secure:**
+```rust
+if vault_account.owner != program_id { return Err(ProgramError::IncorrectProgramId); }
+// Anchor: Account<'info, Vault> auto-checks owner
+```
 
-- **D:** Account relationship not validated — e.g., `vault.authority != signer.key()` not enforced. Attacker passes a vault they control instead of the victim's vault, or passes a mismatched token account.
-- **FP:** Anchor `has_one = authority` constraint present. Native: manual pubkey comparison between stored field and provided account. Constraint logic validates cross-account relationships.
+---
 
-**7. Missing Writable Check**
+## V3 — Type Cosplay — Missing Discriminator
 
-- **D:** Account modified without being marked as writable in the transaction. In older runtime versions, this could cause silent state corruption. Even in newer versions, missing writable annotation in Anchor's `#[account(mut)]` means the framework won't serialize changes back.
-- **FP:** Anchor `#[account(mut)]` present on all modified accounts. Native: explicit `is_writable` check before mutation.
+**Detect:** In native programs: `BorshDeserialize` structs without an 8-byte discriminant field at offset 0. `try_from_slice()` without discriminator check. In Anchor: `AccountLoader` without discriminator validation.
 
-**8. UncheckedAccount Without Manual Validation**
+**Vulnerable:**
+```rust
+#[derive(BorshDeserialize)]
+pub struct User { authority: Pubkey, balance: u64 }
+// No discriminant field — AdminConfig has same layout, can be substituted
+```
 
-- **D:** `UncheckedAccount<'info>` or raw `AccountInfo<'info>` used without any manual ownership, signer, or discriminator checks. This is the most permissive account type — attacker can pass any account.
-- **FP:** Manual checks present after `/// CHECK:` comment (owner, signer, key comparison, data validation). Account only used for reading lamport balance or key comparison (no deserialization).
+**Exploit:** Attacker passes `AdminConfig` account where `User` is expected. Data layouts overlap — attacker's pubkey becomes the "authority."
 
-**9. remaining_accounts Without Validation**
+**Secure:**
+```rust
+pub struct User { discriminant: [u8; 8], authority: Pubkey, balance: u64 }
+// Anchor: #[account] macro auto-generates discriminator
+```
 
-- **D:** `ctx.remaining_accounts` iterated without ownership, signer, type, or data checks. These accounts bypass Anchor's compile-time constraint system entirely — easiest injection point for malicious accounts.
-- **FP:** Full validation loop present: owner check, discriminator check, and signer/writable checks applied to each remaining account. Non-zero data length check present.
+---
 
-**10. Missing Account Close Constraint — Data Accessible After Close**
+## V4 — Reinitialization Attack
 
-- **D:** Account closed by only zeroing lamports without using Anchor's `close` constraint. Data remains readable within the same transaction. Attacker reads sensitive data or reuses the "closed" account in subsequent instructions.
-- **FP:** Anchor `close = recipient` constraint used. Native: full close sequence (zero data → drain lamports → assign to System Program).
+**Detect:** `init` instructions without `is_initialized` flag check (native). `init_if_needed` without post-init state validation (Anchor). Missing discriminator check before writing initialization data.
 
-**11. Account Revival Attack**
+**Vulnerable:**
+```rust
+pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    ctx.accounts.config.authority = ctx.accounts.signer.key();  // overwrites existing authority
+    Ok(())
+}
+// No check whether config was already initialized
+```
 
-- **D:** Account closed by draining lamports but not reassigning ownership to the System Program. Attacker refunds rent to the account address, "reviving" it with stale or manipulated data within the same transaction.
-- **FP:** Proper close: data zeroed, lamports drained, owner set to System Program. Anchor `close` constraint used. Lamport check (`> 0`) before processing accounts.
+**Exploit:** Attacker calls `initialize` again to overwrite authority with their own key.
 
-**12. Operations on Closed Accounts**
+**Secure:**
+```rust
+// Native: if config.is_initialized { return Err(AlreadyInitialized); }
+// Anchor: #[account(init, ...)] prevents reinit via discriminator check
+```
 
-- **D:** Instruction reads or writes to an account that was closed in a prior instruction within the same transaction. Account data is still accessible until the transaction completes, leading to inconsistent state.
-- **FP:** Lamport balance checked (`> 0`) before operating on the account. Discriminator checked (closed accounts have zeroed discriminator). Transaction design prevents close + use in same tx.
+---
 
-**13. Duplicate Mutable Accounts**
+## V5 — init_if_needed Without State Validation
 
-- **D:** Same account passed for two different mutable parameters (e.g., `from` and `to` in a transfer). The last serialized write wins, effectively enabling free "transfers" to self that bypass balance checks or double state mutations.
-- **FP:** Explicit constraint: `from.key() != to.key()`. Anchor constraint with `@ ErrorCode::SameAccount`. Single-reference pattern used when updating different fields of the same account.
+**Detect:** `init_if_needed` in Anchor `#[account(...)]` constraints without subsequent validation of existing state fields when account already exists.
 
-**14. Missing Rent Exemption Check**
+**Vulnerable:**
+```rust
+#[account(init_if_needed, payer = user, space = 8 + UserState::INIT_SPACE,
+          seeds = [b"user", pool.key().as_ref()], bump)]
+pub user_state: Account<'info, UserState>,
+// If account exists, no check that user_state.owner == user.key()
+```
 
-- **D:** New account funded with insufficient lamports — below the rent-exempt threshold. Account becomes eligible for garbage collection by the runtime, causing permanent data loss.
-- **FP:** Anchor `init` with `payer` handles rent automatically. Native: `Rent::get()?.minimum_balance(data_len)` checked. System Program `create_account` called with correct lamports.
+**Exploit:** Attacker pre-creates the PDA with their own authority before the legitimate user. When legitimate user calls, account already exists with attacker's authority.
 
-**15. Unintended Account Closure via close Constraint**
+**Secure:**
+```rust
+// Either use `init` (fails if exists) or validate existing state:
+if user_state.is_initialized {
+    require!(user_state.owner == user.key(), Unauthorized);
+}
+```
 
-- **D:** `close` constraint applied to an account that should persist, or close destination set to an attacker-controllable address. Attacker triggers the close path and receives the rent lamports.
-- **FP:** Close constraint only on accounts explicitly designed to be closeable. Close destination is a trusted address (original payer, program-controlled PDA). Access control on the close instruction.
+---
 
-**16. Missing Token Account Mint Validation**
+## V6 — Missing has_one / Data Mismatch
 
-- **D:** Token account used in a transfer without validating its `mint` field matches the expected mint. Attacker passes a token account for a different (worthless) mint, receiving valuable tokens in return.
-- **FP:** Anchor `#[account(token::mint = expected_mint)]` constraint. Native: manual `token_account.mint == expected_mint` comparison. `has_one = mint` on the state account.
+**Detect:** `Account<'info, T>` with `#[account(mut)]` but no `has_one`, `constraint`, or manual field comparison linking it to other accounts in the instruction.
 
-**17. Missing Token Account Authority Validation**
+**Vulnerable:**
+```rust
+#[account(mut)]
+pub vault: Account<'info, Vault>,
+pub authority: Signer<'info>,
+// No check: vault.authority == authority.key()
+// Attacker passes their own vault
+```
 
-- **D:** Token account's `owner` (authority) field not validated against the expected authority. Attacker passes their own token account where the program expects a protocol-controlled account, redirecting funds.
-- **FP:** Anchor `#[account(token::authority = expected_authority)]` constraint. `has_one = authority` on the vault state. Manual pubkey comparison of token account owner field.
+**Exploit:** Attacker passes a vault they control instead of the victim's vault.
 
-**18. Sysvar Account Spoofing**
+**Secure:**
+```rust
+#[account(mut, has_one = authority)]
+pub vault: Account<'info, Vault>,
+```
 
-- **D:** Sysvar account (Clock, Rent, Instructions, SlotHashes) passed by user without verifying its public key matches the known sysvar address. Attacker passes a fake account with manipulated timestamps, rent values, or instruction data. (Wormhole exploit vector.)
-- **FP:** Sysvar accessed via `Clock::get()?` or `Rent::get()?` (syscall, not account). Anchor `Sysvar<'info, Clock>` type used. Manual address comparison: `account.key == &sysvar::clock::ID`.
+---
 
-**19. Instruction Introspection with Absolute Index**
+## V7 — Missing Writable Annotation
 
-- **D:** `load_instruction_at(0, ...)` or `load_instruction_at_checked(N, ...)` used with an absolute index. Attacker crafts a transaction where the same instruction at index 0 is used to validate multiple program calls, bypassing intended one-time checks.
-- **FP:** Relative indexing used: `get_instruction_relative(-1, ...)` or `load_current_index_checked()` + offset. Correlation validation between current and referenced instructions (same program ID, same accounts).
+**Detect:** Account modified in instruction handler but missing `#[account(mut)]` in Anchor. State changes are silently discarded at end of instruction.
 
-**20. Unchecked load_instruction_at (Pre-1.8.1)**
+**Vulnerable:**
+```rust
+#[account]  // missing `mut`
+pub user_state: Account<'info, UserState>,
+// In handler: user_state.balance += amount;  // change silently discarded
+```
 
-- **D:** `load_instruction_at()` (unchecked version) used instead of `load_instruction_at_checked()`. On Solana < 1.8.1, the sysvar account is not validated, allowing complete instruction spoofing.
-- **FP:** `load_instruction_at_checked()` used. Solana runtime >= 1.8.1. Manual sysvar address validation before call.
+**Exploit:** State updates never persist. Can cause accounting desync — user deposited but balance unchanged.
 
-**21. Missing Account Data Length Check**
+**Secure:**
+```rust
+#[account(mut)]
+pub user_state: Account<'info, UserState>,
+```
 
-- **D:** Account data deserialized without checking `account.data_len()` matches the expected struct size. Truncated or oversized data causes deserialization errors or reads garbage bytes.
-- **FP:** Anchor handles this automatically via `Account<'info, T>`. Native: explicit `if account.data_len() != expected_size` check. Borsh deserialization with proper error handling.
+---
 
-**22. Account Confusion — System Program as Token Program**
+## V8 — UncheckedAccount Without Manual Validation
 
-- **D:** System Program account passed where Token Program is expected (or vice versa). Without program ID validation, the CPI call either fails silently or executes unexpected logic.
-- **FP:** Anchor `Program<'info, Token>` or `Program<'info, System>` types used. Explicit `require_keys_eq!` against known program IDs.
+**Detect:** `UncheckedAccount<'info>` or `AccountInfo<'info>` with `/// CHECK:` comment but no actual validation code (owner check, key comparison, PDA derivation).
 
-**23. Missing Writable Requirement on PDA Signer**
+**Vulnerable:**
+```rust
+/// CHECK: trust me bro
+pub oracle: UncheckedAccount<'info>,
+// No owner check, no key comparison — attacker can pass any account
+```
 
-- **D:** PDA used as a signer in CPI via `invoke_signed` but the target instruction expects the PDA account to be writable (e.g., for lamport transfer). Missing writable flag causes silent CPI failure.
-- **FP:** PDA account marked as writable in both the `AccountMeta` and the Anchor `#[account(mut)]`. Transaction-level writable flag set correctly.
+**Exploit:** Attacker passes fake oracle account with manipulated price data.
 
-**24. Authority Transfer Without Timelock**
+**Secure:**
+```rust
+/// CHECK: Validated below
+pub oracle: UncheckedAccount<'info>,
+// In handler: require!(*oracle.owner == PYTH_PROGRAM_ID, InvalidOracle);
+```
 
-- **D:** Admin/authority can be transferred in a single instruction with no timelock, two-step process, or governance approval. A compromised key immediately takes full control of the protocol.
-- **FP:** Two-step transfer: `propose_authority` + `accept_authority`. Timelock or governance vote required. Multi-sig authority.
+---
 
-**25. Missing Constraint on Config Account Update**
+## V9 — remaining_accounts Without Validation
 
-- **D:** Protocol config account (fee recipient, fee rate, pause flag) updated without sufficient access control or range validation. Attacker or compromised admin redirects fees to attacker-controlled address or sets fees to 100%.
-- **FP:** Access control on config update instruction. Range validation on numeric parameters (`fee_bps <= MAX_FEE`). Fee recipient validated as a known protocol address.
+**Detect:** `ctx.remaining_accounts.iter()` without owner, discriminator, or key checks inside the loop.
 
-**26. Frontrunnable Account Initialization**
+**Vulnerable:**
+```rust
+for account in ctx.remaining_accounts.iter() {
+    let data = account.try_borrow_data()?;
+    process_account_data(&data)?;  // no owner/type validation
+}
+```
 
-- **D:** Account initialization uses predictable PDA seeds without including the payer's key. Attacker frontruns the legitimate initialization with their own authority, gaining control of the account.
-- **FP:** PDA seeds include `payer.key()` or `authority.key()`. `init` constraint ensures single initialization. Seeds include unpredictable components.
+**Exploit:** Attacker injects malicious accounts into remaining_accounts — bypass Anchor's constraint system.
 
-**27. Missing is_initialized Flag Check (Native)**
+**Secure:**
+```rust
+for account in ctx.remaining_accounts.iter() {
+    require!(account.owner == &crate::ID, InvalidOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 8 && data[..8] == UserState::DISCRIMINATOR, InvalidType);
+}
+```
 
-- **D:** In native Rust programs without Anchor, no `is_initialized` boolean flag checked before processing an account. Attacker passes an uninitialized (zeroed) account, causing default/zero values to be treated as valid state.
-- **FP:** Discriminator check (non-zero first bytes). Explicit `is_initialized` flag checked. Account owned by System Program rejected (uninitialized accounts are owned by System Program).
+---
 
-**28. Unconstrained Mint Authority**
+## V10 — Improper Account Closing — Revival Attack
 
-- **D:** Mint authority not validated during token operations. Attacker mints arbitrary tokens if they can invoke the mint instruction without proper authority checks, inflating supply.
-- **FP:** `mint::authority = expected_authority` constraint. Native: mint authority field compared to signer. CPI to token program includes authority validation.
+**Detect:** Account closure via `**account.lamports.borrow_mut() = 0` without zeroing data bytes or writing `CLOSED_ACCOUNT_DISCRIMINATOR`. Missing Anchor `close = recipient` constraint.
 
-**29. Unconstrained Freeze Authority**
+**Vulnerable:**
+```rust
+**dest.lamports.borrow_mut() = dest.lamports().checked_add(source.lamports()).unwrap();
+**source.lamports.borrow_mut() = 0;
+// Data NOT zeroed — account can be revived by transferring lamports back in same tx
+```
 
-- **D:** Token mint created with a freeze authority that is not set to `None` or a trusted address. Holder of freeze authority can freeze any token account at will, griefing users.
-- **FP:** Freeze authority set to `None` at mint initialization. Freeze authority is a governance-controlled address. Token design explicitly requires freeze capability.
+**Exploit:** Within same transaction: close account → transfer 1 lamport back → reuse with stale data.
 
-**30. Missing Mint Close Authority Validation**
+**Secure:**
+```rust
+// Anchor: #[account(mut, close = recipient)]
+// Native: zero data + drain lamports + assign to System Program
+let mut data = account.try_borrow_mut_data()?;
+for byte in data.deref_mut().iter_mut() { *byte = 0; }
+data[..8].copy_from_slice(&CLOSED_ACCOUNT_DISCRIMINATOR);
+```
 
-- **D:** Mint close authority not set to `None` during initialization. A mint with close authority can be closed and re-initialized at the same address with different decimals, breaking all downstream accounting.
-- **FP:** `mint_close_authority` asserted as `None` during init. Mint close authority is a protocol-controlled PDA. Token-2022 mint authority extensions explicitly managed.
+---
+
+## V11 — Operations on Closed Accounts in Same Transaction
+
+**Detect:** Instructions that read/write accounts without checking `lamports() > 0`. Account closed in instruction N, accessed in instruction N+1 within same transaction.
+
+**Vulnerable:**
+```rust
+let data = ctx.accounts.user_data.load()?;  // reads closed account — data is stale/zeroed
+```
+
+**Secure:**
+```rust
+require!(**ctx.accounts.user_data.to_account_info().lamports.borrow() > 0, AccountClosed);
+```
+
+---
+
+## V12 — Duplicate Mutable Accounts
+
+**Detect:** Two or more `#[account(mut)]` fields of the same `Account<'info, T>` type without `constraint = a.key() != b.key()`.
+
+**Vulnerable:**
+```rust
+#[account(mut)] pub from: Account<'info, TokenAccount>,
+#[account(mut)] pub to: Account<'info, TokenAccount>,
+// from == to: self-transfer doubles balance
+```
+
+**Exploit:** Pass same account for `from` and `to`. Last serialization wins — balance doubled.
+
+**Secure:**
+```rust
+#[account(mut, constraint = from.key() != to.key() @ SameAccount)]
+```
+
+---
+
+## V13 — Missing Token Account Mint Validation
+
+**Detect:** Token account used in transfer/CPI without `token::mint = expected_mint` constraint or manual `mint` field comparison.
+
+**Vulnerable:**
+```rust
+#[account(mut)]
+pub user_token: Account<'info, TokenAccount>,
+// No check: user_token.mint == expected_mint.key()
+```
+
+**Exploit:** Attacker passes token account for a worthless mint, receives valuable tokens.
+
+**Secure:**
+```rust
+#[account(mut, token::mint = expected_mint)]
+```
+
+---
+
+## V14 — Missing Token Account Authority Validation
+
+**Detect:** Token account `owner` field not validated against expected authority. Missing `token::authority = expected` or `has_one = authority`.
+
+**Vulnerable:**
+```rust
+#[account(mut)]
+pub vault_token: Account<'info, TokenAccount>,
+// No check: vault_token.owner == vault_pda.key()
+// Attacker passes their own token account
+```
+
+**Secure:**
+```rust
+#[account(mut, token::authority = vault_pda)]
+```
+
+---
+
+## V15 — Sysvar Account Spoofing
+
+**Detect:** Sysvar passed as `AccountInfo<'info>` without address validation. Use of `load_instruction_at()` (unchecked) instead of `load_instruction_at_checked()`. Absence of `Sysvar<'info, Clock>` type.
+
+**Vulnerable:**
+```rust
+let instructions_sysvar = next_account_info(accounts_iter)?;
+let ix = load_instruction_at(0, instructions_sysvar)?;  // unchecked — no address validation!
+```
+
+**Exploit:** **Wormhole ($320M)** — attacker passed fake Instructions sysvar, bypassed guardian signature verification.
+
+**Secure:**
+```rust
+// Use syscall (no account needed): Clock::get()?
+// Or validate address: require!(*sysvar.key == sysvar::instructions::ID);
+// Or Anchor: Sysvar<'info, Clock>
+```
+
+---
+
+## V16 — Instruction Introspection Bypass
+
+**Detect:** `load_instruction_at_checked(0, ...)` with hardcoded absolute index. Same instruction at index 0 validates multiple program invocations.
+
+**Vulnerable:**
+```rust
+let prev_ix = load_instruction_at_checked(0, &sysvar)?;  // absolute index 0
+require!(prev_ix.program_id == ed25519_program::ID);
+// Attacker puts benign Ed25519 at index 0, reuses it to validate malicious calls at index 1, 2, ...
+```
+
+**Secure:**
+```rust
+let current_idx = load_current_index_checked(&sysvar)?;
+let prev_ix = load_instruction_at_checked((current_idx - 1) as usize, &sysvar)?;
+// Relative indexing — each instruction validates its own predecessor
+```
+
+---
+
+## V17 — System / Token Program Confusion
+
+**Detect:** `AccountInfo<'info>` used for program accounts instead of `Program<'info, Token>` or `Program<'info, System>`. Missing `require_keys_eq!` against known program IDs.
+
+**Vulnerable:**
+```rust
+pub token_program: AccountInfo<'info>,  // not validated
+// invoke(&instruction, &[..., token_program.clone()])?;
+```
+
+**Exploit:** Attacker passes malicious program — returns success without performing transfer.
+
+**Secure:**
+```rust
+pub token_program: Program<'info, Token>,  // auto-validates program ID
+```
+
+---
+
+## V18 — Missing Config Account Update Constraints
+
+**Detect:** Config/settings update instructions with `Signer<'info>` but no `constraint` linking signer to stored admin. No range validation on numeric params.
+
+**Vulnerable:**
+```rust
+pub struct UpdateConfig<'info> {
+    #[account(mut)]
+    pub config: Account<'info, Config>,
+    pub admin: Signer<'info>,  // any signer can call — no has_one!
+}
+```
+
+**Secure:**
+```rust
+#[account(mut, has_one = admin)]
+pub config: Account<'info, Config>,
+pub admin: Signer<'info>,
+// Plus: require!(new_fee_bps <= 10_000, FeeTooHigh);
+```
+
+---
+
+## V19 — Predictable PDA Initialization
+
+**Detect:** `#[account(init, ...)]` with PDA seeds that don't include the payer's/authority's key. Seeds derivable by anyone — attacker can pre-create the PDA.
+
+**Vulnerable:**
+```rust
+#[account(init, seeds = [b"config", pool.key().as_ref()], bump, payer = user)]
+pub config: Account<'info, Config>,
+// Anyone can derive this PDA and initialize it first via Jito bundle
+```
+
+**Exploit:** **Pump Science (H-01)** — attacker front-ran `lock_pool` by pre-creating the lock_escrow PDA with predictable seeds. Legitimate migration blocked.
+
+**Secure:**
+```rust
+seeds = [b"config", pool.key().as_ref(), authority.key().as_ref()]
+// Or: validate caller is upgrade authority
+```
+
+---
+
+## V20 — Missing Account Validation Chain
+
+**Detect:** `Account<'info, T>` without `seeds`/`bump` or `address` constraint used as a trust anchor for other account constraints (e.g., `has_one`, `constraint`).
+
+**Vulnerable:**
+```rust
+pub config: Account<'info, Config>,          // UNCONSTRAINED — attacker provides fake
+#[account(constraint = vault.config == config.key())]
+pub vault: Account<'info, Vault>,            // meaningless — validates against fake config
+```
+
+**Exploit:** **Cashio ($48M)** — fake `bank` account passed, all downstream constraints validated against it. Attacker minted unlimited stablecoins with worthless collateral.
+
+**Secure:**
+```rust
+#[account(seeds = [b"config"], bump = config.bump)]  // PDA-anchored root of trust
+pub config: Account<'info, Config>,
+#[account(constraint = vault.config == config.key())]
+pub vault: Account<'info, Vault>,
+```
+
+---
+
+## V21 — Account Space Miscalculation
+
+**Detect:** `space = ` in `#[account(init)]` without `8 +` (missing discriminator). Wrong sizes for `Pubkey` (32), `u64` (8), `bool` (1), `Vec<T>` (4 + len * T), `String` (4 + len), `Option<T>` (1 + T).
+
+**Vulnerable:**
+```rust
+#[account(init, space = std::mem::size_of::<UserState>(), payer = user)]
+// Missing 8-byte discriminator — account too small, deserialization fails
+```
+
+**Exploit:** Undersized accounts cause runtime deserialization errors → DoS. From **Mintify audit**: wrong `LEN` calculations (off by bytes).
+
+**Secure:**
+```rust
+#[account(init, space = 8 + UserState::INIT_SPACE, payer = user)]
+// Or: #[derive(InitSpace)] on the struct
+```
+
+---
+
+## V22 — Ed25519 Signature Verification Bypass
+
+**Detect:** `ed25519_program::ID` check without validating signing pubkey, message content, or signature bytes. Missing nonce for replay prevention. Absolute instruction index.
+
+**Vulnerable:**
+```rust
+let ix = load_instruction_at_checked(0, &sysvar)?;
+require!(ix.program_id == ed25519_program::ID);
+// Doesn't validate WHICH pubkey signed or WHAT message was signed
+```
+
+**Exploit:** Attacker reuses a legitimate Ed25519 verification from another context. No replay protection — same signature works across transactions.
+
+**Secure:**
+```rust
+let sig_data = Ed25519InstructionData::unpack(&ix.data)?;
+require!(sig_data.public_key == expected_signer.to_bytes());
+require!(sig_data.message == expected_message);
+// Nonce: require!(!nonce_account.used); nonce_account.used = true;
+```
+
+---
+
+## V23 — Unconstrained Mint Authority
+
+**Detect:** Mint instruction without `mint::authority = expected` constraint. Token mint CPI without authority signer validation.
+
+**Vulnerable:**
+```rust
+pub fn mint_tokens(ctx: Context<MintTokens>, amount: u64) -> Result<()> {
+    token::mint_to(ctx.accounts.mint_ctx(), amount)?;
+    // No check that caller is authorized to mint
+}
+```
+
+**Exploit:** Anyone calls mint instruction → infinite supply inflation.
+
+**Secure:**
+```rust
+#[account(constraint = mint.mint_authority == COption::Some(authority.key()))]
+pub mint: Account<'info, Mint>,
+pub authority: Signer<'info>,
+```
+
+---
+
+## V24 — Insecure Initialization — No Upgrade Authority Check
+
+**Detect:** Global `initialize` instruction callable by any signer without checking the program's upgrade authority.
+
+**Vulnerable:**
+```rust
+pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    ctx.accounts.global.authority = ctx.accounts.signer.key();  // any signer becomes authority
+}
+```
+
+**Exploit:** **Lombard audit (M2), Onre audit (L2)** — attacker front-runs deployment, calls `initialize` first, becomes protocol admin.
+
+**Secure:**
+```rust
+#[account(constraint = program.programdata_address()? == Some(program_data.key()))]
+pub program: Program<'info, MyProgram>,
+#[account(constraint = program_data.upgrade_authority_address == Some(authority.key()))]
+pub program_data: Account<'info, ProgramData>,
+```
+
+---
+
+## V25 — Missing State Update in Mutation Function
+
+**Detect:** State update functions (like `update_settings`) that don't assign all fields from input params. Copy-paste errors where one field is simply omitted.
+
+**Vulnerable:**
+```rust
+pub fn update_settings(&mut self, params: SettingsInput) {
+    self.fee_rate = params.fee_rate;
+    self.admin = params.admin;
+    // MISSING: self.migration_allocation = params.migration_allocation;
+    self.whitelist = params.whitelist;
+}
+```
+
+**Exploit:** **Pump Science (H-02)** — `migration_token_allocation` never updatable after initialization. Admin believes they changed it but the value stays the same.
+
+**Secure:** Verify every field in the input struct has a corresponding assignment. Write tests that round-trip all settings.

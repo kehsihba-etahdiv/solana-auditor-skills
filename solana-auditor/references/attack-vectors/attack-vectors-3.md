@@ -1,160 +1,463 @@
 # Attack Vectors Reference — Arithmetic, Tokens & State Management (3/4)
 
-> Part 3 of 4 · Vectors 61–90 of 120 total
-> Covers: integer safety, precision loss, token operations, state lifecycle, account closing, fee logic, dust attacks
-
-Each vector follows the format:
-- **D:** Description — what makes it exploitable
-- **FP:** False-positive conditions — mitigations that would make it NOT a finding
+> Part 3 of 4 · Vectors 51–75 of 100 total
+> Covers: integer safety, precision loss, token operations, state lifecycle, fee logic, Token-2022 extensions
+> Sources: Neodyme ($2.6B disclosure), Mayan protocol, Pump Science, Solodit audits, Ackee, Helius
 
 ---
 
-**61. Integer Overflow via Unchecked Arithmetic**
+## V51 — Integer Overflow via Unchecked Arithmetic
 
-- **D:** Standard `+`, `-`, `*` operators used on `u64`/`u128` financial values. In release mode, Rust wraps on overflow — a deposit of `u64::MAX - 100` plus `200` wraps to `99`, effectively destroying funds or creating tokens from nothing.
-- **FP:** `.checked_add()`, `.checked_sub()`, `.checked_mul()`, `.checked_div()` used with `?` propagation. `overflow-checks = true` in Cargo.toml `[profile.release]`. Anchor's `require!` with checked math.
+**Detect:** Direct `+`, `-`, `*`, `/` operators on integer types without `checked_*` wrappers. Missing `overflow-checks = true` in `Cargo.toml [profile.release]`. Note: Anchor's default template sets `overflow-checks = true`, but verify it hasn't been removed.
 
-**62. Integer Underflow on Balance Subtraction**
+**Vulnerable:**
+```rust
+vault.balance = vault.balance + amount;  // wraps on overflow in release mode!
+// u64::MAX - 100 + 200 = 99
+```
 
-- **D:** Balance subtraction without underflow check: `vault.balance -= amount` where `amount > balance`. Wraps to a massive positive value, crediting the attacker with near-unlimited funds.
-- **FP:** `.checked_sub()` used. `require!(vault.balance >= amount)` check before subtraction. Anchor constraint validation.
+**Exploit:** Attacker deposits `u64::MAX - current_balance + desired_balance`, wraps to desired value.
 
-**63. Division Before Multiplication — Precision Loss**
+**Secure:**
+```rust
+vault.balance = vault.balance.checked_add(amount).ok_or(ErrorCode::Overflow)?;
+// Also verify: Cargo.toml [profile.release] overflow-checks = true
+```
 
-- **D:** `(amount / total_supply) * price` truncates the division result before multiplying, losing precision permanently. Attacker exploits by using amounts that truncate to zero, getting free operations.
-- **FP:** Multiplication performed first: `(amount * price) / total_supply`. Higher-precision intermediate type (u128) used. Decimal/fixed-point library used for calculations.
+---
 
-**64. Division by Zero**
+## V52 — Integer Underflow on Balance Subtraction
 
-- **D:** Division operation where the divisor can be zero (e.g., `total_supply`, `pool_balance`, `shares_outstanding`). Causes a panic that aborts the transaction, enabling DoS.
-- **FP:** Explicit zero check: `require!(divisor > 0)`. `.checked_div()` used. Early return or special case when divisor is zero.
+**Detect:** `balance - amount` or `balance -= amount` without prior `require!(balance >= amount)` or `checked_sub`.
 
-**65. Unsafe Integer Casting — Type Narrowing**
+**Vulnerable:**
+```rust
+vault.balance -= withdrawal_amount;  // wraps to u64::MAX if amount > balance
+```
 
-- **D:** Wider type cast to narrower type without bounds check: `value as u32` where `value: u64`. Silently truncates, causing incorrect amounts in transfers, fees, or state updates.
-- **FP:** Explicit bounds check: `require!(val <= u32::MAX as u64)`. `try_into()` with error handling used. Consistent types throughout (no narrowing needed).
+**Secure:**
+```rust
+vault.balance = vault.balance.checked_sub(amount).ok_or(ErrorCode::InsufficientFunds)?;
+```
 
-**66. Rounding Direction Exploitation**
+---
 
-- **D:** Share/token calculations always round in the user's favor. On deposits, rounding up gives slightly more shares; on withdrawals, rounding up gives slightly more tokens. Repeated small operations slowly drain the pool.
-- **FP:** Rounding direction favors the protocol: round down on deposits (fewer shares), round up on withdrawals (fewer tokens returned). `floor` for minting, `ceil` for burning.
+## V53 — Division Before Multiplication — Precision Loss
 
-**67. First Depositor Vault Inflation Attack**
+**Detect:** Division operator or `checked_div` followed by multiplication on integer types. `(a / b) * c` pattern.
 
-- **D:** First depositor mints shares, then donates tokens directly to the vault, inflating the share price. Subsequent depositors' deposits are rounded down to zero shares due to the inflated price, and the first depositor steals their tokens.
-- **FP:** Virtual offset: vault starts with non-zero virtual shares/assets. Minimum deposit enforced. Dead shares minted on initialization. `require!(shares > 0)` on deposit.
+**Vulnerable:**
+```rust
+let share_value = (user_deposit / total_supply) * price;
+// If user_deposit < total_supply, division truncates to 0 → share_value = 0
+```
 
-**68. Round-Trip Profit — Deposit/Withdraw Arbitrage**
+**Exploit:** **Neodyme $2.6B disclosure** — rounding errors in lending protocol rate calculations. Attacker gets free operations when amounts truncate to zero.
 
-- **D:** Due to inconsistent rounding between deposit and withdraw operations, a user can deposit and immediately withdraw for a net profit. Repeated round-trips drain the pool.
-- **FP:** Rounding consistently favors the pool in both directions. Minimum lock period between deposit and withdraw. Round-trip test: `deposit(X) → withdraw(all) ≤ X`.
+**Secure:**
+```rust
+let share_value = user_deposit.checked_mul(price)?.checked_div(total_supply)?;
+// Multiply first, then divide — preserves precision
+// Use u128 for intermediate results
+```
 
-**69. Saturating Math Misuse**
+---
 
-- **D:** `.saturating_sub()` used where underflow should be an error, not silently clamped to zero. A health factor or balance clamped to zero instead of reverting enables invalid state transitions.
-- **FP:** `saturating_sub` only used where a floor of zero is semantically correct (e.g., remaining time). `.checked_sub()` used for financial calculations. Explicit `require!` before subtraction.
+## V54 — Division by Zero
 
-**70. Price Slippage Not Enforced**
+**Detect:** Division where divisor can be zero: `total_supply`, `pool_balance`, `shares_outstanding`, `total_staked`. Any division without prior zero check or `checked_div`.
 
-- **D:** Swap, purchase, or pricing function lacks a user-provided `min_amount_out` or `max_price` parameter. MEV bots sandwich the transaction, manipulating price between submission and execution.
-- **FP:** `expected_price` or `min_amount_out` parameter required. Slippage tolerance enforced with `require!`. Deadline parameter prevents stale execution.
+**Vulnerable:**
+```rust
+let reward_per_share = total_rewards / total_staked;  // panics if total_staked == 0
+```
 
-**71. Lamport Balance Invariant Violation**
+**Exploit:** **Kamino Lend (W7)**, **Watt Protocol (H1)** — division by zero on first interaction or empty pool state. Transaction panics → DoS.
 
-- **D:** Custom logic creates or destroys lamports — violating Solana's invariant that total lamports across all accounts in an instruction must remain constant. Can cause runtime errors or exploitable accounting discrepancies.
-- **FP:** All lamport transfers are balanced: sum of debits equals sum of credits. System Program used for lamport transfers. Manual lamport math verified with assertions.
+**Secure:**
+```rust
+let reward_per_share = total_rewards.checked_div(total_staked).unwrap_or(0);
+// Or: require!(total_staked > 0, NoStakers);
+```
 
-**72. Rent Lamports Sent to Arbitrary Destination**
+---
 
-- **D:** When closing an account, rent-exempt lamports transferred to a user-specified destination without validation. Attacker redirects rent from protocol accounts to themselves.
-- **FP:** Close destination hardcoded to original payer or program-controlled address. Anchor `close = known_recipient`. Validated recipient address.
+## V55 — Unsafe Integer Casting — `as` Truncation
 
-**73. Token Dust Account Poisoning**
+**Detect:** `as u32`, `as u16`, `as u8`, `as i64` — any narrowing cast using `as` keyword. Silent truncation without error.
 
-- **D:** Attacker deposits a tiny (dust) amount into a token account, preventing it from being closed (close requires zero balance). This permanently blocks account closure, leaking rent and preventing state cleanup.
-- **FP:** Dust swept or burned before close. Dust threshold defined — operations below threshold rejected. `close_account` with force flag if balance is below dust threshold.
+**Vulnerable:**
+```rust
+let amount_u32 = amount_u64 as u32;  // silently drops high bits
+// 0x1_0000_0064 as u32 = 100 — attacker bypasses amount check
+```
 
-**74. Fee Bypass on Alternative Code Path**
+**Secure:**
+```rust
+let amount_u32 = u32::try_from(amount_u64).map_err(|_| ErrorCode::CastOverflow)?;
+```
 
-- **D:** Protocol fee applied on one code path (e.g., normal withdrawal) but not on another (e.g., emergency withdrawal, single-asset exit). Attacker uses the fee-free path to avoid paying fees.
-- **FP:** Fees applied on every exit/withdrawal path. Single fee calculation function used across all paths. Fee-free paths have access control (e.g., admin-only emergency).
+---
 
-**75. Pre-Fee / Post-Fee Amount Confusion**
+## V56 — Rounding Direction Exploitation
 
-- **D:** Fee calculated on the pre-fee amount but the capacity check uses the post-fee amount (or vice versa). This creates accounting mismatches — either overfilling beyond capacity or under-charging fees.
-- **FP:** Consistent amount used: either pre-fee throughout or post-fee throughout. Fee deducted atomically with the principal operation. Clear naming: `amount_before_fee`, `amount_after_fee`.
+**Detect:** `try_round_u64()` in share/token calculations. Rounding that favors users on both deposit AND withdraw paths. Missing directional rounding.
 
-**76. Fee Deduction Not Atomic with Transfer**
+**Vulnerable:**
+```rust
+// Deposit: shares = collateral.try_div(rate)?.try_round_u64()?;  // rounds UP → user gets more
+// Withdraw: tokens = shares.try_div(rate)?.try_round_u64()?;     // rounds UP → user gets more
+```
 
-- **D:** Fee calculated and deducted in a separate instruction from the transfer. Attacker skips the fee instruction or reorders instructions to avoid payment.
-- **FP:** Fee deducted in the same instruction as the transfer. Atomic transaction design. Fee deducted from the transferred amount (not a separate call).
+**Exploit:** Repeated small deposit/withdraw cycles drain the pool by rounding profit each cycle.
 
-**77. Token Decimals Mismatch**
+**Secure:**
+```rust
+// Deposit: round DOWN (fewer shares for user): try_floor_u64()
+// Withdraw: round DOWN (fewer tokens for user): try_floor_u64()
+// Protocol always favors the pool
+```
 
-- **D:** Token operations assume a specific decimal count (e.g., 6 for USDC) without reading the mint's actual `decimals` field. When a token with different decimals is used, amounts are off by orders of magnitude.
-- **FP:** `mint.decimals` read and used in all calculations. `transfer_checked` used (requires decimals parameter). Decimal normalization applied.
+---
 
-**78. Missing Transfer Amount Validation**
+## V57 — First Depositor Vault Inflation Attack
 
-- **D:** Transfer instruction accepts `amount = 0` without validation. Zero-amount transfers can be used to trigger side effects (events, state updates, reward snapshots) without actual economic commitment.
-- **FP:** `require!(amount > 0)` check on all transfer/deposit/withdraw instructions. Minimum amount enforced. Zero-amount short-circuits to no-op.
+**Detect:** Vault/pool with share-based accounting where first deposit has no minimum. Share calculation: `shares = deposit * total_shares / total_assets` where `total_shares` and `total_assets` start at 0.
 
-**79. Coupled State Fields Not Reset Atomically**
+**Vulnerable:**
+```rust
+let shares = if total_shares == 0 { deposit_amount } else {
+    deposit_amount * total_shares / total_assets
+};
+// Attacker: deposit 1 (gets 1 share), then donate 1e9 tokens directly to vault
+// total_assets = 1e9+1, total_shares = 1
+// Victim deposits 1e9 tokens: shares = 1e9 * 1 / (1e9+1) = 0 shares!
+```
 
-- **D:** Account has logically coupled fields (e.g., `shares_pending` + `total_shares`, `rewards_owed` + `last_claim_time`). On close or completion, one field is reset but the other isn't, leaving the account in an inconsistent state exploitable in future operations.
-- **FP:** All coupled fields reset in the same instruction. Struct method that resets all related fields atomically. Close constraint zeros entire account data.
+**Exploit:** First depositor steals all subsequent deposits via share price inflation.
 
-**80. Counter Drift — Statistic Not Updated Atomically**
+**Secure:**
+```rust
+// Virtual offset: start with non-zero virtual shares/assets
+let shares = (deposit_amount + VIRTUAL_OFFSET) * total_shares / (total_assets + VIRTUAL_OFFSET);
+// Or: require!(shares > 0, ZeroShares);
+// Or: dead shares minted on initialization
+```
 
-- **D:** Global counters (total_deposits, total_users, volume) updated in a separate step from the operation that triggers them. If the update is skipped (error, reorder), counters drift, breaking protocol invariants.
-- **FP:** Counters updated in the same instruction as the triggering operation. Atomic increment: `counter = counter.checked_add(1)?`. Counter can be re-derived from on-chain state if needed.
+---
 
-**81. Time Unit Mismatch — Slots vs Seconds**
+## V58 — Round-Trip Profit — Deposit/Withdraw Arbitrage
 
-- **D:** One part of the code uses slot numbers, another uses Unix timestamps (seconds), but they're compared directly. A vesting window in seconds compared to slot-based timestamps can unlock 4× earlier than intended.
-- **FP:** Single canonical time unit used throughout. Explicit scale factor applied when converting. Field names annotated: `_slot`, `_timestamp_secs`. `Clock::get()?.unix_timestamp` used consistently.
+**Detect:** Inconsistent rounding between deposit and withdraw paths. Test: `deposit(X) → withdraw(all) > X`.
 
-**82. Stale Clock — Using Cached Timestamp**
+**Vulnerable:**
+```rust
+// Deposit rounds UP shares, withdraw rounds UP tokens
+// Each round trip: user profits a small amount
+```
 
-- **D:** `Clock::get()` called once, timestamp cached, then used across multiple operations within the instruction. For most programs this is fine, but if the instruction spans multiple CPI calls that depend on ordering, the cached value may not reflect the expected time context.
-- **FP:** `Clock::get()` called once per instruction (normal and expected). Timestamp used only for comparison, not for absolute scheduling. No time-sensitive CPI interleaving.
+**Secure:** Both paths round in protocol's favor. Add round-trip invariant test.
 
-**83. Account Data Realloc Without Zero-Init**
+---
 
-- **D:** Account data reallocated to a larger size without zero-initializing the new bytes. Old data from the memory allocator may leak into the new space, causing unpredictable behavior.
-- **FP:** Anchor `realloc` with `zero` = true constraint. Native: `memset` on new bytes. New space explicitly initialized before use.
+## V59 — Saturating Math Misuse
 
-**84. Unbounded Collection — Compute DoS**
+**Detect:** `saturating_sub`, `saturating_add`, `saturating_mul` used in financial calculations where overflow/underflow should be an error, not silently clamped.
 
-- **D:** Instruction iterates over a variable-length collection (vector, remaining_accounts, linked list) without an upper bound. Attacker grows the collection until iteration exceeds the compute budget, permanently DoS-ing the instruction.
-- **FP:** Fixed upper bound on collection size. Pagination pattern used. `SetComputeUnitLimit` budgeted for worst case. Iteration short-circuits or processes in batches.
+**Vulnerable:**
+```rust
+let remaining = health_factor.saturating_sub(penalty);
+// If penalty > health_factor, silently returns 0 instead of reverting
+// Unhealthy position treated as healthy
+```
 
-**85. Self-Transfer Inflates Fee Claims**
+**Secure:**
+```rust
+let remaining = health_factor.checked_sub(penalty).ok_or(ErrorCode::Unhealthy)?;
+```
 
-- **D:** Transfer function allows `source == destination`. A self-transfer that triggers fee calculation or reward snapshot allows the user to accumulate fees/rewards without actual economic activity.
-- **FP:** `require!(source.key() != destination.key())` check. Self-transfer short-circuits to no-op. Fee calculation skipped for zero-net-movement operations.
+---
 
-**86. Missing Preprocessing on Share Transfer**
+## V60 — Price Slippage Not Enforced
 
-- **D:** Shares or LP tokens transferred between users without settling pending fees/rewards on both source and destination first. Destination receives fees they never earned; source loses fees they're owed.
-- **FP:** Both source and destination preprocessed (fees settled, reward accumulators snapshotted) before share transfer. Automatic settlement via transfer hook. Fee settlement in same instruction.
+**Detect:** Swap/purchase/trade functions without `min_amount_out`, `max_price`, or `expected_price` parameter. Price-sensitive operations without user-provided bounds.
 
-**87. Expired Account Not Closeable**
+**Vulnerable:**
+```rust
+pub fn swap(ctx: Context<Swap>, amount_in: u64) -> Result<()> {
+    let amount_out = calculate_output(amount_in, &ctx.accounts.pool)?;
+    transfer_to_user(ctx, amount_out)?;
+    // No minimum_amount_out check — sandwich attack
+}
+```
 
-- **D:** Time-limited accounts (offers, escrows, locks) have no expiry-based close mechanism. Expired accounts leak rent indefinitely and can be griefed by keeping them alive.
-- **FP:** Anyone can close expired accounts (not just creator). Expiry check: `require!(clock.unix_timestamp >= expiry)`. Automatic cleanup via crank or keeper.
+**Exploit:** MEV bot front-runs: manipulate price → user swaps at bad rate → back-run to profit.
 
-**88. Token-2022 Interest-Bearing Token Not Accounted For**
+**Secure:**
+```rust
+pub fn swap(ctx: Context<Swap>, amount_in: u64, min_amount_out: u64) -> Result<()> {
+    let amount_out = calculate_output(amount_in, &ctx.accounts.pool)?;
+    require!(amount_out >= min_amount_out, SlippageExceeded);
+}
+```
 
-- **D:** Token-2022 interest-bearing extension modifies the effective balance over time, but the program reads the raw balance. Calculations based on raw balance are incorrect, leading to under/over-accounting.
-- **FP:** Interest-bearing extension detected and effective balance calculated. Only standard SPL tokens supported (documented and enforced). Token-2022 extensions explicitly handled.
+---
 
-**89. Token-2022 Transfer Fee Not Accounted For**
+## V61 — Lamport Balance Invariant Violation
 
-- **D:** Token-2022 transfer fee extension deducts a fee on every transfer, but the program assumes the full amount arrives at the destination. Accounting becomes inconsistent — the program credits more than was received.
-- **FP:** Transfer fee extension detected. Post-transfer balance checked instead of using input amount. `transfer_checked` with fee calculation. Only non-fee tokens supported (enforced).
+**Detect:** Manual lamport manipulation that creates/destroys lamports. Sum of debits must equal sum of credits across all accounts in an instruction.
 
-**90. Unsafe Rust Block Without Justification**
+**Vulnerable:**
+```rust
+**account_a.lamports.borrow_mut() += 1000;
+// No corresponding debit from another account — runtime rejects
+```
 
-- **D:** `unsafe` block used for performance optimization (zero-copy, raw pointer access) without proper bounds checking. Memory corruption or out-of-bounds read can lead to arbitrary state manipulation.
-- **FP:** No `unsafe` blocks in the codebase. `unsafe` blocks have explicit safety comments and bounds checks. `bytemuck` or `zerocopy` used instead of raw pointer manipulation.
+**Secure:** All lamport transfers balanced. Use System Program for transfers.
+
+---
+
+## V62 — Rent Lamports to Arbitrary Destination
+
+**Detect:** Account close with rent lamports transferred to user-specified destination without validation. `close = recipient` where recipient is unvalidated.
+
+**Vulnerable:**
+```rust
+// Close sends rent to attacker-provided address instead of original payer
+```
+
+**Secure:**
+```rust
+#[account(mut, close = original_payer)]  // hardcoded or PDA-controlled destination
+```
+
+---
+
+## V63 — Token Dust Account Poisoning
+
+**Detect:** Token account close logic that doesn't handle non-zero dust balance. `close_account` requires zero balance.
+
+**Vulnerable:**
+```rust
+// Attacker deposits 1 token → account can never be closed
+// Rent permanently locked
+```
+
+**Secure:**
+```rust
+// Sweep dust before close, or reject deposits below dust threshold
+// For Token-2022: also check withheld transfer fees via .closable()
+```
+
+---
+
+## V64 — Fee Bypass on Alternative Code Path
+
+**Detect:** Fee applied in normal path but not in emergency/alternative path. Multiple withdrawal/exit functions with inconsistent fee application.
+
+**Vulnerable:**
+```rust
+pub fn withdraw(ctx, amount) { let fee = amount * fee_bps / 10000; transfer(amount - fee); }
+pub fn emergency_withdraw(ctx, amount) { transfer(amount); }  // no fee!
+```
+
+**Secure:** Single fee calculation function used across all exit paths.
+
+---
+
+## V65 — Pre-Fee / Post-Fee Amount Confusion
+
+**Detect:** Fee calculated on input amount, capacity/limit check uses post-fee amount (or vice versa). Inconsistent amount reference.
+
+**Vulnerable:**
+```rust
+let fee = amount * fee_bps / 10000;
+require!(amount <= vault.capacity);     // checks pre-fee
+vault.balance += amount - fee;          // stores post-fee
+// Vault can exceed capacity by fee amount
+```
+
+**Exploit:** **Pump Science (M-01)** — fee calculated on input amount before `apply_buy` recomputed the actual SOL amount. Last buyer pays wrong fee.
+
+**Secure:** Consistent: either pre-fee throughout or post-fee throughout. Fee deducted atomically.
+
+---
+
+## V66 — Token Decimals Mismatch
+
+**Detect:** Hardcoded decimal assumptions (e.g., `* 1_000_000` for USDC) without reading `mint.decimals`. Missing `transfer_checked` (requires decimals param).
+
+**Vulnerable:**
+```rust
+let value_usd = token_amount * price / 1_000_000;  // assumes 6 decimals
+// Fails for tokens with 9 decimals — off by 1000x
+```
+
+**Secure:**
+```rust
+let value = token_amount.checked_mul(price)?.checked_div(10u64.pow(mint.decimals as u32))?;
+```
+
+---
+
+## V67 — Coupled State Fields Not Reset Atomically
+
+**Detect:** Logically coupled fields (e.g., `shares_pending` + `total_shares`) where one is reset but not the other. Struct reset/close that doesn't zero all related fields.
+
+**Vulnerable:**
+```rust
+user_state.shares_pending = 0;
+// user_state.rewards_owed NOT reset — stale rewards claimable
+```
+
+**Exploit:** **Watt Protocol (C4)** — unstake withdrew full balance but position record remained intact. User re-stakes to multiply position.
+
+**Secure:** Reset all coupled fields atomically in same instruction.
+
+---
+
+## V68 — Time Unit Mismatch — Slots vs Seconds
+
+**Detect:** Code mixing `clock.slot` with `clock.unix_timestamp`. One part uses slots (~400ms), another uses seconds, compared directly.
+
+**Vulnerable:**
+```rust
+let lock_end = clock.unix_timestamp + 86400;  // 1 day in seconds
+// Later: if clock.slot > lock_end { unlock(); }  // slot number >> seconds — unlocks immediately
+```
+
+**Secure:** Single canonical time unit. Field names annotated: `_slot`, `_timestamp_secs`.
+
+---
+
+## V69 — Account Data Realloc Without Zero-Init
+
+**Detect:** `realloc` with `zero = false` or `.realloc(new_size, false)`. After shrink + expand, old data from previous allocation leaks into new space.
+
+**Vulnerable:**
+```rust
+#[account(mut, realloc = new_size, realloc::payer = payer, realloc::zero = false)]
+// If account previously shrunk then re-expanded, old data leaks
+```
+
+**Secure:**
+```rust
+realloc::zero = true  // zeroes new space
+```
+
+---
+
+## V70 — Unbounded Collection — Compute DoS
+
+**Detect:** Loops over `Vec`, `remaining_accounts`, or linked structures without upper bound. Variable-length iteration that can exceed 200K (default) or 1.4M (max) compute units.
+
+**Vulnerable:**
+```rust
+for user in ctx.remaining_accounts.iter() {
+    process_user(user)?;  // unbounded — grows until compute exceeded
+}
+```
+
+**Exploit:** Attacker grows collection until instruction permanently exceeds compute budget → DoS.
+
+**Secure:**
+```rust
+const MAX_BATCH: usize = 32;
+require!(ctx.remaining_accounts.len() <= MAX_BATCH, TooManyAccounts);
+```
+
+---
+
+## V71 — Missing Preprocessing on Share Transfer
+
+**Detect:** LP token or share transfer without settling pending fees/rewards on both source and destination first.
+
+**Vulnerable:**
+```rust
+pub fn transfer_shares(from, to, amount) {
+    from.shares -= amount;
+    to.shares += amount;
+    // from's pending rewards NOT settled — lost
+    // to receives rewards they never earned
+}
+```
+
+**Secure:** Settle rewards on both accounts before any share balance change.
+
+---
+
+## V72 — Token-2022 Interest-Bearing Token Not Accounted
+
+**Detect:** Token-2022 interest-bearing extension where program reads raw `amount` instead of effective (interest-adjusted) balance.
+
+**Vulnerable:**
+```rust
+let balance = token_account.amount;  // raw balance — doesn't include accrued interest
+// Under-accounting if interest has accrued
+```
+
+**Secure:** Detect interest-bearing extension and calculate effective balance.
+
+---
+
+## V73 — Token-2022 Transfer Fee Blocks Account Close
+
+**Detect:** `close_account` CPI guarded only by `amount == 0` without checking `.closable()` on fee/confidential transfer extensions. Withheld fees prevent closure.
+
+**Vulnerable:**
+```rust
+if token_account.amount == 0 {
+    close_account(cpi_ctx)?;  // FAILS if withheld_amount > 0
+}
+```
+
+**Exploit:** Protocol cannot close token accounts, rent permanently locked.
+
+**Secure:**
+```rust
+let state = PodStateWithExtensions::<PodAccount>::unpack(&data)?;
+if let Ok(fee_state) = state.get_extension::<TransferFeeAmount>() {
+    fee_state.closable()?;  // checks withheld == 0
+}
+// Harvest withheld fees to mint first, then close
+```
+
+---
+
+## V74 — Floating-Point Arithmetic in Financial Logic
+
+**Detect:** `f64`, `f32`, `as f64` in any financial calculation. Direct `==` comparison on floats. `ui_amount` from SPL Token used in arithmetic.
+
+**Vulnerable:**
+```rust
+let ui_amount = token_account.amount as f64 / 10f64.powi(decimals as i32);
+if ui_amount != 1.0 { return Err(InvalidAmount); }  // float comparison — unreliable
+```
+
+**Exploit:** **Solodit Escrow audit (Critical)** — f64 precision loss caused incorrect token amounts. Float comparison `!= 1.0` fails due to floating-point representation.
+
+**Secure:**
+```rust
+// Use integer arithmetic with explicit scaling
+let expected_amount = 10u64.pow(decimals as u32);  // 1.0 in base units
+require!(token_account.amount == expected_amount, InvalidAmount);
+```
+
+---
+
+## V75 — Lamport / SOL Denomination Confusion
+
+**Detect:** Hardcoded lamport amounts that are wrong by factor of 1000 (1 SOL = 1_000_000_000 lamports, not 1_000_000). Constants like `LAMPORTS_PER_SOL` not used.
+
+**Vulnerable:**
+```rust
+const LISTING_FEE: u64 = 1_000_000;  // intended: 1 SOL — actual: 0.001 SOL (off by 1000x)
+```
+
+**Exploit:** **Solodit Escrow audit (Critical)** — fees 1000x lower than intended due to missing 3 zeros.
+
+**Secure:**
+```rust
+use solana_program::native_token::LAMPORTS_PER_SOL;
+const LISTING_FEE: u64 = LAMPORTS_PER_SOL;  // 1_000_000_000
+```
