@@ -1,8 +1,7 @@
 # Attack Vectors Reference — Arithmetic, Tokens & State Management (3/4)
 
-> Part 3 of 4 · Vectors 51–75 of 100 total
+> Part 3 of 5 · Vectors 51–75 of 105 total
 > Covers: integer safety, precision loss, token operations, state lifecycle, fee logic, Token-2022 extensions
-> Sources: Neodyme ($2.6B disclosure), Mayan protocol, Pump Science, Solodit audits, Ackee, Helius
 
 ---
 
@@ -82,19 +81,25 @@ let reward_per_share = total_rewards.checked_div(total_staked).unwrap_or(0);
 
 ---
 
-## V55 — Unsafe Integer Casting — `as` Truncation
+## V55 — Unsafe Integer Casting — `as` Truncation and Sign Reinterpretation
 
-**Detect:** `as u32`, `as u16`, `as u8`, `as i64` — any narrowing cast using `as` keyword. Silent truncation without error.
+**Detect:** `as u32`, `as u16`, `as u8` — narrowing casts using `as` keyword. `as u64` on `i64` — signed-to-unsigned reinterpretation. `as i64` on large `u64` — unsigned-to-signed overflow. Any `as` cast between integer types without `try_from`.
 
 **Vulnerable:**
 ```rust
 let amount_u32 = amount_u64 as u32;  // silently drops high bits
 // 0x1_0000_0064 as u32 = 100 — attacker bypasses amount check
+
+let price = oracle_price_feed.price;  // i64, can be negative
+let value = amount * (price as u64);  // -1i64 as u64 = 18446744073709551615
 ```
 
 **Secure:**
 ```rust
 let amount_u32 = u32::try_from(amount_u64).map_err(|_| ErrorCode::CastOverflow)?;
+
+require!(price > 0, NegativePrice);
+let price_u64 = u64::try_from(price).map_err(|_| ErrorCode::InvalidCast)?;
 ```
 
 ---

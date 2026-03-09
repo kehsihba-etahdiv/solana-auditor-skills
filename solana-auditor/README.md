@@ -1,6 +1,6 @@
 # Solana Auditor
 
-The ultimate AI-powered security audit skill for Solana — 100 attack vectors with concrete code detection patterns, 4 parallel scan agents, adversarial reasoning, and DeFi protocol analysis.
+The ultimate AI-powered security audit skill for Solana — 105 attack vectors with concrete code detection patterns, 4 parallel scan agents, adversarial reasoning, and DeFi protocol analysis.
 
 Built for:
 
@@ -12,7 +12,7 @@ Not a substitute for a formal audit — but the most comprehensive AI check you 
 
 ## What's Inside
 
-- **100 attack vectors** across 4 reference files — each with Detect/Vulnerable/Exploit/Secure code patterns. Covering account validation, PDA security, CPI trust boundaries, arithmetic safety, token operations (SPL + Token-2022), state lifecycle, oracle manipulation, staking/rewards, and DeFi protocol economics. Backed by real audit findings (Wormhole, Cashio, Mango Markets, Pump Science, Neodyme, Tensor, and more)
+- **105 attack vectors** across 5 reference files — each with Detect/Vulnerable/Exploit/Secure code patterns. Covering account validation, PDA security, CPI trust boundaries, arithmetic safety, token operations (SPL + Token-2022), state lifecycle, oracle manipulation, staking/rewards, and DeFi protocol economics. Backed by real audit findings (Wormhole, Cashio, Mango Markets, Pump Science, Neodyme, Tensor, and more)
 - **4 parallel vector-scan agents** — each assigned 25 vectors, scanning the full codebase simultaneously
 - **Adversarial reasoning agent** (DEEP mode) — free-form exploit hunting using Feynman questioning, state inconsistency analysis, and invariant hunting
 - **Solana protocol agent** (DEEP mode) — domain-specific checklists for lending, AMM/DEX, vaults, staking, bridges, governance, proxies, and session keys

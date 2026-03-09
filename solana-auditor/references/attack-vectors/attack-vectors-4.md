@@ -1,8 +1,7 @@
 # Attack Vectors Reference — Oracle, DeFi & Platform-Level (4/4)
 
-> Part 4 of 4 · Vectors 76–100 of 100 total
+> Part 4 of 5 · Vectors 76–100 of 105 total
 > Covers: oracle security, staking/rewards, DeFi protocol patterns, compute/platform, input validation, real-world exploit patterns
-> Sources: Mango Markets ($115M), Pump Science (Code4rena), Solana Foundation (Code4rena), Ackee audits, Neodyme, Helius, osec.io
 
 ---
 

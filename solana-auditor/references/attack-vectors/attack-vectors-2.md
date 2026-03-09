@@ -1,8 +1,7 @@
 # Attack Vectors Reference — PDA, CPI & Cross-Program Security (2/4)
 
-> Part 2 of 4 · Vectors 26–50 of 100 total
+> Part 2 of 5 · Vectors 26–50 of 105 total
 > Covers: PDA derivation, seed security, CPI safety, invoke_signed, signer escalation, Token-2022 CPI, program validation
-> Sources: sealevel-attacks, Jet Protocol, Crema Finance, Ackee audits, Neodyme, Tensor, Solodit
 
 ---
 

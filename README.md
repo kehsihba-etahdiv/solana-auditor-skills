@@ -1,6 +1,6 @@
 # Solana Auditor Skills
 
-> The ultimate Claude Code skill for Solana smart contract security auditing — 100 attack vectors with concrete code detection patterns, 6 parallel agents, DeFi protocol checklists, and adversarial reasoning.
+> The ultimate Claude Code skill for Solana smart contract security auditing — 105 attack vectors with concrete code detection patterns, 6 parallel agents, DeFi protocol checklists, and adversarial reasoning.
 
 Built in the style of [pashov/skills](https://github.com/pashov/skills) (Solidity) but rebuilt from scratch for **Rust/SVM/Solana**. Aggregates knowledge from 10+ open-source audit and development skill repositories.
 
@@ -19,7 +19,7 @@ The same proven architecture as pashov/skills — adapted for Solana's account m
 3. **Spawn** — launch 4–6 agents in parallel (vector scan, adversarial reasoning, protocol analysis)
 4. **Report** — merge, deduplicate by root cause, sort by confidence, format
 
-### 100 Attack Vectors (4 reference files)
+### 105 Attack Vectors (5 reference files)
 
 | File | Vectors | Focus Areas |
 | --- | --- | --- |
@@ -27,6 +27,7 @@ The same proven architecture as pashov/skills — adapted for Solana's account m
 | [attack-vectors-2](solana-auditor/references/attack-vectors/attack-vectors-2.md) | V26–V50 | PDA derivation (bumps, sharing, collisions, seeds), CPI safety (arbitrary CPI, signer privilege forwarding, stale data, return values), invoke_signed, Token-2022 (permanent delegate, transfer fee, non-transferable, mint close authority), cross-program reentrancy, security dependency chains |
 | [attack-vectors-3](solana-auditor/references/attack-vectors/attack-vectors-3.md) | V51–V75 | Integer overflow/underflow, precision loss (Neodyme $2.6B), rounding direction, first-depositor inflation, fee bypass, dust poisoning, token decimals, state lifecycle (close, realloc), coupled fields, time units, Token-2022 closable/interest, floating-point, lamport denomination |
 | [attack-vectors-4](solana-auditor/references/attack-vectors/attack-vectors-4.md) | V76–V100 | Oracle manipulation (staleness, confidence, fake accounts, Mango $115M), staking reward gaming, flash stake, reward dilution, cooldown griefing, vault inflation, compute/heap DoS, signature replay, on-chain randomness, rent in bonding curves (Pump Science), transfer hook validation, upgrade authority |
+| [attack-vectors-5](solana-auditor/references/attack-vectors/attack-vectors-5.md) | V101–V105 | CPI ownership reassignment, unsafe deserialization without input length validation, orphan account lifecycle, partial discriminator matching, dynamic Token-2022 account sizing |
 
 ### 3 Specialized Agent Types
 
@@ -79,13 +80,13 @@ cp -r solana-auditor/ ~/.cursor/skills/solana-auditor
 
 | Skill | Description |
 | --- | --- |
-| [solana-auditor](solana-auditor/) | 100-vector security audit with 4–6 parallel agents, DeFi protocol checklists, and adversarial reasoning |
+| [solana-auditor](solana-auditor/) | 105-vector security audit with 4–6 parallel agents, DeFi protocol checklists, and adversarial reasoning |
 
 ---
 
 ## What's Included
 
-### 100 Attack Vectors (4 reference files)
+### 105 Attack Vectors (5 reference files)
 
 Every vector includes: **Detect** (grep-able code patterns), **Vulnerable** (concrete Rust code snippet), **Exploit** (how attacker uses it, with real-world references), **Secure** (correct code pattern). Organized by attack surface:
 
@@ -93,9 +94,11 @@ Every vector includes: **Detect** (grep-able code patterns), **Vulnerable** (con
 
 **PDA, CPI & Cross-Program Security (V26–V50):** Non-canonical bumps, PDA sharing, seed concatenation collisions, arbitrary CPI, signer privilege forwarding, stale data after CPI (missing `reload()`), CPI return values ignored, Token-2022 permanent delegate (silent vault drain), transfer fee accounting mismatch, non-transferable tokens, mint close authority reinitialization bypass, CPI ordering violations, security dependency chains, dangling references after CPI close.
 
-**Arithmetic, Tokens & State Management (V51–V75):** Integer overflow/underflow, division-before-multiplication (Neodyme $2.6B), unsafe `as` casting, rounding direction exploitation, first-depositor vault inflation, saturating math misuse, slippage not enforced, fee bypass on alternate paths, pre/post-fee confusion (Pump Science M-01), token decimals mismatch, coupled field inconsistency, time unit mismatch, Token-2022 transfer fee blocks account close, floating-point in financial logic, lamport/SOL denomination confusion.
+**Arithmetic, Tokens & State Management (V51–V75):** Integer overflow/underflow, division-before-multiplication (Neodyme $2.6B), unsafe `as` casting (narrowing + signed-to-unsigned), rounding direction exploitation, first-depositor vault inflation, saturating math misuse, slippage not enforced, fee bypass on alternate paths, pre/post-fee confusion (Pump Science M-01), token decimals mismatch, coupled field inconsistency, time unit mismatch, Token-2022 transfer fee blocks account close, floating-point in financial logic, lamport/SOL denomination confusion.
 
 **Oracle, DeFi & Platform-Level (V76–V100):** Stale oracle price, confidence interval, fake oracle account, on-chain spot price manipulation (Mango Markets $115M), staking reward index bugs, flash stake/unstake, reward dilution via direct transfer, cooldown griefing, self-liquidation profit, vault share inflation, compute budget DoS, heap exhaustion (32KB), signature replay without nonce, on-chain randomness manipulation, rent in bonding curves (Pump Science M-02), transfer hook validation, `.unwrap()` panics, upgrade authority, interest during pause.
+
+**Additional Vectors (V101–V105):** CPI ownership reassignment, unsafe deserialization without input length validation, orphan account from parent-child lifecycle, partial discriminator matching, dynamic Token-2022 account sizing.
 
 ### Protocol Checklists (74 items across 8 domains)
 
@@ -133,6 +136,7 @@ This skill aggregates knowledge from the following open-source repositories. We 
 | [solana-claude-config](https://github.com/nicholasgasior/solana-claude-config) | Nicholas Gasior | 13-step audit workflow, Anchor architect agent (PDA architecture, token programs, CPI patterns), Anchor engineer agent (modern patterns, constraint patterns, testing), comprehensive Anchor rules (446 lines), security checklists |
 | [aeither/solana-anchor-claude-skill](https://github.com/aeither/solana-anchor-claude-skill) | Aeither | Anchor development coding guidelines, platform terminology, Anchor version best practices, project structure conventions, PDA management patterns, space calculation methodology |
 | [nicholasgasior/dot-context](https://github.com/nicholasgasior/dot-context) | Nicholas Gasior | 11 Solana/Anchor audit check categories (account constraints, PDA safety, CPI safety, deserialization, error handling, token operations, system accounts, type cosplay, closing accounts), 10 detailed vulnerability knowledge base files |
+| [exvulsec/exvul-solana-skill](https://github.com/exvulsec/exvul-solana-skill) | ExVulSec | 5 additional attack vectors (V101–V105): CPI ownership reassignment, unsafe deserialization without input length validation, orphan account lifecycle, partial discriminator matching, dynamic Token-2022 account sizing. Also informed V55 signed-to-unsigned casting improvement |
 
 ### Methodology & Agents
 

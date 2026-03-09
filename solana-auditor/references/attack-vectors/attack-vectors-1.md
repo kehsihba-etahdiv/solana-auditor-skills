@@ -1,8 +1,7 @@
 # Attack Vectors Reference — Account Validation & Authorization (1/4)
 
-> Part 1 of 4 · Vectors 1–25 of 100 total
+> Part 1 of 5 · Vectors 1–25 of 105 total
 > Covers: signer checks, ownership, discriminators, account constraints, reinitialization, account validation chains
-> Sources: Wormhole ($320M), Cashio ($48M), sealevel-attacks, Helius, OtterSec, Ackee, Solodit audits
 
 ---
 
